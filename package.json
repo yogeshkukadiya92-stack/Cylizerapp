@@ -16,6 +16,7 @@
     "db:verify": "npm run verify --workspace @callora/database",
     "db:migrate": "npm run migrate --workspace @callora/database",
     "db:seed": "npm run seed --workspace @callora/database",
+    "db:bootstrap": "npm run bootstrap:production --workspace @callora/database",
     "release:db:verify": "npm run verify:phase3d --workspace @callora/database",
     "release:preflight:test": "node --test scripts/phase3d-release-preflight.test.mjs",
     "release:preflight:config": "node scripts/phase3d-release-preflight.mjs --config",
