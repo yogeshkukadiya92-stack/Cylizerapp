@@ -22,8 +22,11 @@
     "release:preflight:network": "node scripts/phase3d-release-preflight.mjs --network",
     "release:preflight:android": "node scripts/phase3d-release-preflight.mjs --android",
     "release:preflight:all": "node scripts/phase3d-release-preflight.mjs --all",
+    "release:launch-gate": "node scripts/launch-evidence-gate.mjs",
+    "release:launch-gate:test": "node --test scripts/launch-evidence-gate.test.mjs",
+    "release:load-smoke": "node scripts/http-load-smoke.mjs",
     "android:check": "cd apps/android && ./gradlew :app:testDemoDebugUnitTest :app:testEnterpriseDebugUnitTest :app:assembleDemoDebug :app:assembleEnterpriseDebug :app:lintDemoDebug :app:lintEnterpriseDebug --console=plain",
-    "check": "npm run db:verify && npm run release:preflight:test && npm run typecheck && npm run test && npm run build"
+    "check": "npm run db:verify && npm run release:preflight:test && npm run release:launch-gate:test && npm run typecheck && npm run test && npm run build"
   },
   "engines": {
     "node": ">=20"

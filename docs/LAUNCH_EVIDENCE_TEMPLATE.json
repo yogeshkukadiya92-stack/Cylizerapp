@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "security": { "openCritical": null, "openHigh": null, "independentReviewId": null },
+  "load": { "peakRequestsPerSecond": null, "sustainedRequestsPerSecond": null, "errorRate": null, "p95Ms": null, "targetP95Ms": null },
+  "restore": { "evidenceId": null, "actualRpoMinutes": null, "targetRpoMinutes": null, "actualRtoMinutes": null, "targetRtoMinutes": null },
+  "pilots": [],
+  "privacy": { "counselApprovalId": null, "dpaApprovalId": null, "subprocessorApprovalId": null },
+  "stores": { "playApproved": false, "appStoreApproved": false },
+  "drills": { "exportEvidenceId": null, "deletionEvidenceId": null, "incidentEvidenceId": null, "rollbackEvidenceId": null },
+  "owners": { "product": null, "engineering": null, "security": null, "support": null }
+}

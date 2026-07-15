@@ -143,6 +143,9 @@ describe("Callora API", () => {
       const health = await app.inject({ method: "GET", url: "/health" });
       expect(health.statusCode).toBe(200);
       expect(json<SuccessPayload<{ status: string }>>(health).data.status).toBe("ok");
+      expect(health.headers["x-frame-options"]).toBe("DENY");
+      expect(health.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+      expect(health.headers["permissions-policy"]).toContain("microphone=()")
 
       repository.setReady(false);
       const ready = await app.inject({ method: "GET", url: "/ready" });

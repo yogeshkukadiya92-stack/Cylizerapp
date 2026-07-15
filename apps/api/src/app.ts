@@ -624,6 +624,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.addHook("onSend", async (_request, reply, payload) => {
     void reply.header("x-content-type-options", "nosniff");
     void reply.header("cache-control", "no-store");
+    void reply.header("x-frame-options", "DENY");
+    void reply.header("referrer-policy", "no-referrer");
+    void reply.header("permissions-policy", "camera=(), geolocation=(), microphone=()");
+    void reply.header("content-security-policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
     return payload;
   });
 
