@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -585,7 +585,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   if (config.environment === "production" && options.repository === undefined) {
     throw new Error("A durable production CalloraRepository must be provided in production");
   }
-  if (config.environment === "production" && options.oidcVerifier === undefined) {
+  if (config.environment === "production" && config.authMode !== "builtin" && options.oidcVerifier === undefined) {
     throw new Error("A production OIDC bearer verifier must be provided in production");
   }
   if (config.environment === "production" &&
@@ -676,7 +676,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const token = parseBearerToken(request.headers.authorization);
     let actor: ActorContext | undefined;
 
-    if (config.environment === "production") {
+    if (config.environment === "production" && config.authMode !== "builtin") {
       let identity;
       try {
         identity = await (oidcVerifier as OidcBearerVerifier).verify(token);
@@ -857,6 +857,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return success(request, { status: "ready", time: clock.now().toISOString(), release: config.releaseSha ?? "development", capabilities: { reportDownloads: Boolean(options.reportArtifactReader), recordingUploads: Boolean(options.recordingService), apiKeyManagement: Boolean(options.apiKeyManager) } });
   });
 
+  if (config.authMode === "builtin") {
+    app.post("/v1/auth/builtin/session", async (request) => { const body = bodyRecord(request); const provided = createHash("sha256").update(requiredString(body.accessKey, "accessKey", 512)).digest(); const expected = Buffer.from(config.builtinAuthKeyHash!, "hex"); if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) throw unauthenticated("The access key is invalid"); const organizationId = requiredString(body.organizationId ?? "00000000-0000-4000-8000-000000000001", "organizationId", 100); const actor = await repository.findDevelopmentActor(organizationId, "owner"); if (!actor) throw notFound("Built-in administrator is unavailable"); const issued = tokens.issue(actor.user.id, actor.organization.id); return success(request, { accessToken: issued.accessToken, tokenType: "Bearer", expiresAt: issued.expiresAt, actor: { userId: actor.user.id, displayName: actor.user.displayName, email: actor.user.email, organizationId: actor.organization.id, organizationName: actor.organization.name, role: actor.roleKey, permissions: actor.permissions } }); });
+  }
   if (config.environment !== "production" && config.enableDevAuth) {
     app.post("/v1/dev/session", async (request) => {
       const body = bodyRecord(request);

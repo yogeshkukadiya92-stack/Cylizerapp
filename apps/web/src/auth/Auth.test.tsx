@@ -133,7 +133,7 @@ describe('Callora authentication', () => {
     expect(createRuntimeAuthSession({}, window.location.origin).mode).toBe('dev')
     expect(resolveAuthConfig({}, 'https://app.example.test', true)).toEqual({
       mode: 'invalid',
-      error: 'Production requires explicit VITE_AUTH_MODE=oidc configuration.',
+      error: 'Production requires VITE_AUTH_MODE=oidc or builtin.',
     })
     expect(resolveAuthConfig({ VITE_AUTH_MODE: 'dev' }, 'https://app.example.test', true).mode).toBe('invalid')
   })

@@ -28,6 +28,8 @@ export interface ApiConfig {
   trustedProxyCidrs: string[];
   allowedOrigins: string[];
   releaseSha?: string;
+  authMode?: "oidc" | "builtin";
+  builtinAuthKeyHash?: string;
   database?: DatabaseConfig;
 }
 
@@ -178,6 +180,8 @@ export function loadConfig(
 
   const database = readDatabaseConfig(env, environment);
   const releaseSha = env.RELEASE_SHA?.trim(); if (releaseSha && !/^[a-f0-9]{7,64}$/i.test(releaseSha)) throw new Error("RELEASE_SHA must be a 7-64 character hexadecimal commit identifier");
+  const authMode = (env.AUTH_MODE?.trim() || "oidc") as "oidc" | "builtin"; if (!["oidc", "builtin"].includes(authMode)) throw new Error("AUTH_MODE must be oidc or builtin");
+  const builtinAuthKeyHash = env.BUILTIN_AUTH_KEY_HASH?.trim(); if (authMode === "builtin" && (!builtinAuthKeyHash || !/^[a-f0-9]{64}$/i.test(builtinAuthKeyHash))) throw new Error("BUILTIN_AUTH_KEY_HASH must be a SHA-256 hex digest in builtin mode");
 
   return {
     environment,
@@ -214,6 +218,8 @@ export function loadConfig(
     trustedProxyCidrs: readTrustedProxyCidrs(env.TRUSTED_PROXY_CIDRS),
     allowedOrigins,
     ...(releaseSha ? { releaseSha } : {}),
+    authMode,
+    ...(builtinAuthKeyHash ? { builtinAuthKeyHash } : {}),
     ...(database === undefined ? {} : { database }),
   };
 }

@@ -85,7 +85,7 @@ try {
         config.pairingAttemptWindowSeconds,
       ),
       idGenerator: new UuidIdGenerator(),
-      oidcVerifier: new ProductionOidcBearerVerifier(loadOidcVerifierConfig()),
+      ...(config.authMode === "builtin" ? {} : { oidcVerifier: new ProductionOidcBearerVerifier(loadOidcVerifierConfig()) }),
       apiKeyManager: new PostgresApiKeyManager(pool),
       ...(artifacts ? { reportArtifactReader: artifacts } : {}),
     });

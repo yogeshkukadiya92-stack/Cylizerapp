@@ -3,6 +3,7 @@ import { resolveAuthConfig } from './config'
 import { resolveApiBaseUrl } from '../api/client'
 import { DevAuthSession } from './devSession'
 import { OidcAuthSession } from './oidcSession'
+import { BuiltinAuthSession } from './builtinSession'
 import type { AuthSession } from './types'
 
 class InvalidAuthSession implements AuthSession {
@@ -35,6 +36,7 @@ export function createRuntimeAuthSession(
 ): AuthSession {
   const config = resolveAuthConfig(environment, currentOrigin, isProduction)
   if (config.mode === 'dev') return new DevAuthSession()
+  if (config.mode === 'builtin') return new BuiltinAuthSession()
   if (config.mode === 'invalid') return new InvalidAuthSession(config.error)
   try {
     resolveApiBaseUrl(environment.VITE_API_URL, {

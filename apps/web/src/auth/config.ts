@@ -18,6 +18,7 @@ export interface AuthEnvironment {
 
 export type ResolvedAuthConfig =
   | { mode: 'dev' }
+  | { mode: 'builtin' }
   | { mode: 'oidc'; oidc: OidcConfig }
   | { mode: 'invalid'; error: string }
 
@@ -63,12 +64,13 @@ export function resolveAuthConfig(
   )
   const mode = requestedMode ?? (hasOidcSetting ? 'oidc' : 'dev')
 
-  if (isProduction && mode !== 'oidc') {
-    return { mode: 'invalid', error: 'Production requires explicit VITE_AUTH_MODE=oidc configuration.' }
+  if (isProduction && mode !== 'oidc' && mode !== 'builtin') {
+    return { mode: 'invalid', error: 'Production requires VITE_AUTH_MODE=oidc or builtin.' }
   }
   if (mode === 'dev') return { mode: 'dev' }
+  if (mode === 'builtin') return { mode: 'builtin' }
   if (mode !== 'oidc') {
-    return { mode: 'invalid', error: 'VITE_AUTH_MODE must be either “dev” or “oidc”.' }
+    return { mode: 'invalid', error: 'VITE_AUTH_MODE must be dev, builtin, or oidc.' }
   }
 
   const authority = trimmed(environment.VITE_OIDC_AUTHORITY)

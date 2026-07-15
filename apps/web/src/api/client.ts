@@ -183,7 +183,7 @@ export interface DashboardOverviewQuery {
 export interface CalloraApiClientOptions {
   baseUrl?: string
   fetcher?: typeof fetch
-  authMode?: 'dev' | 'oidc'
+  authMode?: 'dev' | 'oidc' | 'builtin'
   currentOrigin?: string
   isProduction?: boolean
 }
@@ -247,6 +247,7 @@ export class CalloraApiClient {
       signal,
     })
   }
+  createBuiltinSession(accessKey: string, signal?: AbortSignal): Promise<DevSessionData> { return this.request('/v1/auth/builtin/session', { method: 'POST', body: JSON.stringify({ accessKey }), signal }) }
 
   getSession(accessToken: string, signal?: AbortSignal): Promise<WorkspaceSessionData> {
     return this.request('/v1/session', { accessToken, signal })

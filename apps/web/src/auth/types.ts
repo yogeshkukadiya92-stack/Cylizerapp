@@ -1,4 +1,4 @@
-export type AuthMode = 'dev' | 'oidc'
+export type AuthMode = 'dev' | 'oidc' | 'builtin'
 
 export interface AuthUserSummary {
   subject: string
