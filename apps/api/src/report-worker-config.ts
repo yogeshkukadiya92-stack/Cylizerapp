@@ -5,7 +5,7 @@ export interface ReportWorkerConfig {
   queueDatabaseUrl: string;
   dataDatabaseUrl: string;
   databaseSslMode: PostgresSslMode;
-  artifactRoot: string;
+  artifact: { kind: "filesystem"; root: string } | { kind: "s3"; endpoint: string; bucket: string; region: string; accessKeyId: string; secretAccessKey: string; encryptionKey: Uint8Array };
   pollIntervalMs: number;
   leaseSeconds: number;
   scheduleLimit: number;
@@ -31,9 +31,18 @@ export function loadReportWorkerConfig(env: Readonly<Record<string, string | und
   if (queueDatabaseUrl === dataDatabaseUrl) throw new Error("Report queue and data database credentials must use separate least-privilege URLs");
   const databaseSslMode = required(env, "REPORT_DATABASE_SSL_MODE");
   postgresSslOptions(databaseSslMode, { requireVerified: env.NODE_ENV === "production" });
+  const artifactKind = env.REPORT_ARTIFACT_STORE?.trim() || "filesystem";
+  let artifact: ReportWorkerConfig["artifact"];
+  if (artifactKind === "filesystem") artifact = { kind: "filesystem", root: required(env, "REPORT_ARTIFACT_ROOT") };
+  else if (artifactKind === "s3") {
+    const endpoint = required(env, "REPORT_S3_ENDPOINT"); let parsed: URL; try { parsed = new URL(endpoint); } catch { throw new Error("REPORT_S3_ENDPOINT must be an absolute HTTPS URL"); }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("REPORT_S3_ENDPOINT must be an absolute HTTPS URL without credentials, query, or fragment");
+    const encodedKey = required(env, "REPORT_S3_ENCRYPTION_KEY"); const encryptionKey = Buffer.from(encodedKey, "base64url"); if (encryptionKey.length !== 32 || encryptionKey.toString("base64url") !== encodedKey) throw new Error("REPORT_S3_ENCRYPTION_KEY must encode exactly 32 bytes as unpadded base64url");
+    artifact = { kind: "s3", endpoint, bucket: required(env, "REPORT_S3_BUCKET"), region: required(env, "REPORT_S3_REGION"), accessKeyId: required(env, "REPORT_S3_ACCESS_KEY_ID"), secretAccessKey: required(env, "REPORT_S3_SECRET_ACCESS_KEY"), encryptionKey };
+  } else throw new Error("REPORT_ARTIFACT_STORE must be filesystem or s3");
   return {
     workerId, queueDatabaseUrl, dataDatabaseUrl, databaseSslMode: databaseSslMode as PostgresSslMode,
-    artifactRoot: required(env, "REPORT_ARTIFACT_ROOT"),
+    artifact,
     pollIntervalMs: integer(env, "REPORT_WORKER_POLL_INTERVAL_MS", 2_000, 250, 60_000),
     leaseSeconds: integer(env, "REPORT_WORKER_LEASE_SECONDS", 300, 30, 1_800),
     scheduleLimit: integer(env, "REPORT_WORKER_SCHEDULE_LIMIT", 50, 1, 100),

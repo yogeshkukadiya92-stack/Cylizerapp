@@ -11,6 +11,7 @@ import { loadConfig } from "../src/config.js";
 import { InMemoryCalloraRepository, SequentialIdGenerator, SequentialPairingCodeGenerator } from "../src/repository.js";
 import type { Clock } from "../src/security.js";
 import { createDownloadToken, hashDownloadToken } from "../src/report-workflows.js";
+import type { ApiKeyManager } from "../src/postgres/api-key-repository.js";
 
 class MutableClock implements Clock {
   constructor(private value: Date) {}
@@ -119,10 +120,13 @@ describe("Callora API", () => {
   let app: FastifyInstance;
   let repository: InMemoryCalloraRepository;
   let clock: MutableClock;
+  let apiKeys: ApiKeyManager;
 
   beforeEach(() => {
     repository = new InMemoryCalloraRepository(new SequentialIdGenerator());
     clock = new MutableClock(new Date("2026-07-14T12:00:00.000Z"));
+    const records: Array<{ id: string; prefix: string; name: string; scopes: Array<"leads.read">; createdAt: string; revokedAt?: string }> = [];
+    apiKeys = { create: async (_organizationId, _userId, name, scopes, at) => { const record = { id: "key-1", prefix: "clr_live_key1", name, scopes: scopes as Array<"leads.read">, createdAt: at }; records.push(record); return { ...record, key: "clr_live_key1.secret" }; }, list: async () => records, revoke: async (_organizationId, id, at) => { const record = records.find((item) => item.id === id); if (!record || record.revokedAt) return false; record.revokedAt = at; return true; } };
     app = buildApp({
       config,
       repository,
@@ -130,6 +134,7 @@ describe("Callora API", () => {
       idGenerator: new SequentialIdGenerator(),
       pairingCodeGenerator: new SequentialPairingCodeGenerator(),
       reportArtifactReader: { get: async () => ({ body: new TextEncoder().encode("xlsx-bytes"), contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName: "callora-report.xlsx" }) },
+      apiKeyManager: apiKeys,
       logger: false,
     });
   });
@@ -394,6 +399,10 @@ describe("Callora API", () => {
       });
       expect(rejected.headers["access-control-allow-origin"]).toBeUndefined();
     });
+  });
+
+  describe("durable API key management", () => {
+    it("shows a new secret once, lists metadata, validates scopes, and revokes", async () => { const token = await session(app); const created = await app.inject({ method: "POST", url: "/v1/api-keys", headers: authorization(token), payload: { name: "CRM", scopes: ["leads.read"] } }); expect(created.statusCode).toBe(201); expect(json<SuccessPayload<{ key: string }>>(created).data.key).toBe("clr_live_key1.secret"); const listed = await app.inject({ method: "GET", url: "/v1/api-keys", headers: authorization(token) }); expect(JSON.stringify(json(listed))).not.toContain(".secret"); const invalid = await app.inject({ method: "POST", url: "/v1/api-keys", headers: authorization(token), payload: { name: "bad", scopes: ["admin"] } }); expect(invalid.statusCode).toBe(400); const revoked = await app.inject({ method: "DELETE", url: "/v1/api-keys/key-1", headers: authorization(token) }); expect(revoked.statusCode).toBe(204); });
   });
 
   describe("tenant context and RBAC", () => {

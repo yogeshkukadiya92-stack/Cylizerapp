@@ -8,6 +8,7 @@ export { PostgresPairingAttemptLimiter } from "./limiter.js";
 export { PostgresReportWorkerRepository } from "./report-worker-repository.js";
 export { PostgresReportRowLoader } from "./report-row-loader.js";
 export { PostgresEmailDeliveryQueue } from "./notification-delivery-repository.js";
+export { PostgresApiKeyManager, type ApiKeyManager } from "./api-key-repository.js";
 export {
   isCanonicalUuid,
   PostgresCalloraRepository,

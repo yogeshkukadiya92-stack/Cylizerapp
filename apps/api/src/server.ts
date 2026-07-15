@@ -8,10 +8,21 @@ import {
   postgresSslOptions,
   PostgresCalloraRepository,
   PostgresPairingAttemptLimiter,
+  PostgresApiKeyManager,
   UuidIdGenerator,
 } from "./postgres/index.js";
 import { SystemClock } from "./security.js";
 import { FileSystemReportArtifactReader } from "./report-worker.js";
+import { EncryptedS3ReportArtifactStore } from "./s3-artifact-store.js";
+
+function reportArtifactReader() {
+  const kind = process.env.REPORT_ARTIFACT_STORE?.trim() || "filesystem";
+  if (kind === "filesystem") return process.env.REPORT_ARTIFACT_ROOT?.trim() ? new FileSystemReportArtifactReader(process.env.REPORT_ARTIFACT_ROOT) : undefined;
+  if (kind !== "s3") throw new Error("REPORT_ARTIFACT_STORE must be filesystem or s3");
+  const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error(`${name} is required for S3 report artifacts`); return value; };
+  const encodedKey = required("REPORT_S3_ENCRYPTION_KEY"); const encryptionKey = Buffer.from(encodedKey, "base64url"); if (encryptionKey.length !== 32 || encryptionKey.toString("base64url") !== encodedKey) throw new Error("REPORT_S3_ENCRYPTION_KEY must encode exactly 32 bytes as unpadded base64url");
+  return new EncryptedS3ReportArtifactStore({ endpoint: required("REPORT_S3_ENDPOINT"), bucket: required("REPORT_S3_BUCKET"), region: required("REPORT_S3_REGION"), accessKeyId: required("REPORT_S3_ACCESS_KEY_ID"), secretAccessKey: required("REPORT_S3_SECRET_ACCESS_KEY"), encryptionKey });
+}
 
 let activeApp: FastifyInstance | undefined;
 let activeRepository: PostgresCalloraRepository | undefined;
@@ -61,6 +72,7 @@ try {
       })),
     });
     const clock = new SystemClock();
+    const artifacts = reportArtifactReader();
     activeApp = buildApp({
       config,
       repository: activeRepository,
@@ -74,7 +86,8 @@ try {
       ),
       idGenerator: new UuidIdGenerator(),
       oidcVerifier: new ProductionOidcBearerVerifier(loadOidcVerifierConfig()),
-      ...(process.env.REPORT_ARTIFACT_ROOT?.trim() ? { reportArtifactReader: new FileSystemReportArtifactReader(process.env.REPORT_ARTIFACT_ROOT) } : {}),
+      apiKeyManager: new PostgresApiKeyManager(pool),
+      ...(artifacts ? { reportArtifactReader: artifacts } : {}),
     });
   } else {
     activeApp = buildApp({ config });

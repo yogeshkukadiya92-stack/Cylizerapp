@@ -27,6 +27,7 @@ export interface ApiConfig {
   pairingAttemptWindowSeconds: number;
   trustedProxyCidrs: string[];
   allowedOrigins: string[];
+  releaseSha?: string;
   database?: DatabaseConfig;
 }
 
@@ -176,6 +177,7 @@ export function loadConfig(
   }
 
   const database = readDatabaseConfig(env, environment);
+  const releaseSha = env.RELEASE_SHA?.trim(); if (releaseSha && !/^[a-f0-9]{7,64}$/i.test(releaseSha)) throw new Error("RELEASE_SHA must be a 7-64 character hexadecimal commit identifier");
 
   return {
     environment,
@@ -211,6 +213,7 @@ export function loadConfig(
     ),
     trustedProxyCidrs: readTrustedProxyCidrs(env.TRUSTED_PROXY_CIDRS),
     allowedOrigins,
+    ...(releaseSha ? { releaseSha } : {}),
     ...(database === undefined ? {} : { database }),
   };
 }

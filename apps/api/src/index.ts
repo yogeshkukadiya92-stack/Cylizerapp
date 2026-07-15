@@ -48,6 +48,7 @@ export {
   PostgresReportWorkerRepository,
   PostgresReportRowLoader,
   PostgresEmailDeliveryQueue,
+  PostgresApiKeyManager,
   UuidIdGenerator,
   type CreatePostgresPoolOptions,
   type OutboxEventRecord,

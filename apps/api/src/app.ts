@@ -62,6 +62,8 @@ import { buildDashboardOverview, type DashboardPreset, type DashboardQuery } fro
 import { createDownloadToken, hashDownloadToken, REPORT_DOWNLOAD_TTL_SECONDS } from "./report-workflows.js";
 import type { ReportArtifactReader } from "./report-worker.js";
 import type { RecordingService } from "./recording-service.js";
+import type { ApiKeyManager } from "./postgres/api-key-repository.js";
+import type { ApiScope } from "./commercial-platform.js";
 import {
   OidcBearerVerificationError,
   type OidcBearerVerifier,
@@ -118,6 +120,7 @@ export interface BuildAppOptions {
   pairingLimiter?: SharedAttemptLimiter;
   reportArtifactReader?: ReportArtifactReader;
   recordingService?: RecordingService;
+  apiKeyManager?: ApiKeyManager;
   logger?: boolean;
 }
 
@@ -842,7 +845,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     await repository.appendAuditEvent({ ...event, id: ids.next("audit"), occurredAt: at });
   };
 
-  app.get("/health", async (request) => success(request, { status: "ok", time: clock.now().toISOString() }));
+  app.get("/health", async (request) => success(request, { status: "ok", time: clock.now().toISOString(), release: config.releaseSha ?? "development" }));
   app.get("/ready", async (request, reply) => {
     if (!(await repository.ping())) {
       return reply.status(503).send({
@@ -851,7 +854,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
         requestId: request.id,
       });
     }
-    return success(request, { status: "ready", time: clock.now().toISOString() });
+    return success(request, { status: "ready", time: clock.now().toISOString(), release: config.releaseSha ?? "development", capabilities: { reportDownloads: Boolean(options.reportArtifactReader), recordingUploads: Boolean(options.recordingService), apiKeyManagement: Boolean(options.apiKeyManager) } });
   });
 
   if (config.environment !== "production" && config.enableDevAuth) {
@@ -1414,6 +1417,16 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       }, at);
     }
     return success(request, result);
+  });
+
+  app.get("/v1/api-keys", { preHandler: protect("integrations.read") }, async (request) => {
+    if (!options.apiKeyManager) throw new ApiDomainError({ statusCode: 503, code: "INTERNAL_ERROR", message: "API key management is unavailable" }); const actor = currentActor(request); return success(request, { items: await options.apiKeyManager.list(actor.organization.id) });
+  });
+  app.post("/v1/api-keys", { preHandler: protect("integrations.manage") }, async (request, reply) => {
+    if (!options.apiKeyManager) throw new ApiDomainError({ statusCode: 503, code: "INTERNAL_ERROR", message: "API key management is unavailable" }); const actor = currentActor(request); const body = bodyRecord(request); const allowed = new Set<ApiScope>(["leads.read", "leads.write", "reports.read", "webhooks.manage"]); if (!Array.isArray(body.scopes) || body.scopes.length < 1 || body.scopes.length > allowed.size || body.scopes.some((scope) => typeof scope !== "string" || !allowed.has(scope as ApiScope)) || new Set(body.scopes).size !== body.scopes.length) throw badRequest("scopes must contain unique supported API scopes", "scopes"); const created = await options.apiKeyManager.create(actor.organization.id, actor.user.id, requiredString(body.name, "name", 120), body.scopes as ApiScope[], clock.now().toISOString()); reply.code(201); return success(request, created);
+  });
+  app.delete("/v1/api-keys/:keyId", { preHandler: protect("integrations.manage") }, async (request, reply) => {
+    if (!options.apiKeyManager) throw new ApiDomainError({ statusCode: 503, code: "INTERNAL_ERROR", message: "API key management is unavailable" }); const actor = currentActor(request); const params = isRecord(request.params) ? request.params : {}; if (!await options.apiKeyManager.revoke(actor.organization.id, requiredString(params.keyId, "keyId", 100), clock.now().toISOString())) throw notFound("API key not found"); reply.code(204); return reply.send();
   });
 
   app.post("/v1/recordings/uploads", { preHandler: protect("recordings.manage") }, async (request, reply) => {

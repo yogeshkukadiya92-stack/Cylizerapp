@@ -250,6 +250,7 @@ grant select on
 to callora_api;
 
 grant select, insert on callora.audit_events to callora_api;
+grant select, insert, update on callora.api_keys to callora_api;
 
 -- Phase 4A CRM tables start from a deny-all baseline on every replay. Leads,
 -- follow-ups, and correction history use lifecycle transitions instead of
