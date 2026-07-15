@@ -47,6 +47,7 @@ export {
   PostgresPairingAttemptLimiter,
   PostgresReportWorkerRepository,
   PostgresReportRowLoader,
+  PostgresEmailDeliveryQueue,
   UuidIdGenerator,
   type CreatePostgresPoolOptions,
   type OutboxEventRecord,
@@ -70,3 +71,4 @@ export {
   type ReportWorkerRepository,
 } from "./report-worker.js";
 export { loadReportWorkerConfig, type ReportWorkerConfig } from "./report-worker-config.js";
+export { processNextEmailDelivery, type ClaimedEmailDelivery, type EmailDeliveryQueue, type EmailProvider } from "./notification-worker.js";

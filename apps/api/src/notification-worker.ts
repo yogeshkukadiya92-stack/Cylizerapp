@@ -1,0 +1,9 @@
+export interface ClaimedEmailDelivery { organizationId:string; id:string; userId:string; recipientEmail:string; event:string; payload:Record<string,unknown>; attemptCount:number; }
+export interface EmailDeliveryQueue { claim(workerId:string):Promise<ClaimedEmailDelivery|undefined>; delivered(delivery:ClaimedEmailDelivery,providerMessageId:string,at:string):Promise<void>; retry(delivery:ClaimedEmailDelivery,message:string,availableAt:string,at:string):Promise<void>; suppress(delivery:ClaimedEmailDelivery,reason:string,at:string):Promise<void>; }
+export interface EmailProvider { send(input:{to:string;subject:string;text:string;metadata:{deliveryId:string;event:string}}):Promise<{messageId:string}>; }
+function safeMessage(error:unknown){return(error instanceof Error?error.message:"Email provider failure").replace(/[\r\n\t]/g," ").slice(0,500);}
+export async function processNextEmailDelivery(options:{queue:EmailDeliveryQueue;provider:EmailProvider;workerId:string;now?:Date}):Promise<"idle"|"delivered"|"retried"|"failed">{
+  const delivery=await options.queue.claim(options.workerId); if(!delivery)return"idle"; const now=options.now??new Date();
+  try{const result=await options.provider.send({to:delivery.recipientEmail,subject:"Your Callora report is ready",text:"Your report is ready. Sign in to Callora and open Report automation to download it.",metadata:{deliveryId:delivery.id,event:delivery.event}});await options.queue.delivered(delivery,result.messageId,now.toISOString());return"delivered";}
+  catch(error){if(delivery.attemptCount>=5){await options.queue.suppress(delivery,"delivery_attempts_exhausted",now.toISOString());return"failed";}const delay=Math.min(3600,30*2**Math.max(0,delivery.attemptCount-1));await options.queue.retry(delivery,safeMessage(error),new Date(now.getTime()+delay*1000).toISOString(),now.toISOString());return"retried";}
+}

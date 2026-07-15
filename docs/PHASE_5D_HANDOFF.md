@@ -26,6 +26,9 @@
 - Migration `0018_report_ready_delivery.sql` grants the worker read-only access
   to notification preferences; runtime-role replay preserves the exact Phase 5
   queue/delivery allowlist.
+- Migration `0019_notification_delivery_claims.sql` and the email worker add
+  `SKIP LOCKED` concurrent claims, provider-neutral sending, sanitized errors,
+  bounded exponential retries, terminal suppression, and provider-message audit IDs.
 - Cryptographically random download grants; only their SHA-256 digests enter persistence.
 
 ## Verification
