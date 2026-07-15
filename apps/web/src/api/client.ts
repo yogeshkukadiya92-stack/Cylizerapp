@@ -24,6 +24,8 @@ import type {
   ReportSchedule,
   NotificationPreference,
   ReportExportJob,
+  NotificationInbox,
+  InAppNotification,
   CreateSavedReportViewInput,
   CreateReportScheduleInput,
   Permission,
@@ -562,6 +564,14 @@ export class CalloraApiClient {
 
   downloadReport(jobId: string, token: string, accessToken: string, signal?: AbortSignal): Promise<DownloadedFile> {
     return this.requestFile(`/v1/report-downloads/${encodeURIComponent(jobId)}/redeem`, { method: 'POST', body: JSON.stringify({ token }), headers: { 'Content-Type': 'application/json' }, accessToken, signal }, 'callora-report.csv')
+  }
+
+  getNotificationInbox(accessToken: string, signal?: AbortSignal): Promise<NotificationInbox> {
+    return this.request('/v1/notifications?limit=25', { accessToken, signal })
+  }
+
+  markNotificationRead(notificationId: string, accessToken: string, signal?: AbortSignal): Promise<InAppNotification> {
+    return this.request(`/v1/notifications/${encodeURIComponent(notificationId)}/read`, { method: 'POST', accessToken, signal })
   }
 
   revokeDevice(

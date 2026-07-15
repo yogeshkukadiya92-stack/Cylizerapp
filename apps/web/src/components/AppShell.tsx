@@ -14,6 +14,7 @@ interface AppShellProps {
   searchQuery: string
   onSearchChange: (value: string) => void
   onSignOut?: () => void
+  notificationCenter?: ReactNode
 }
 
 export function AppShell({
@@ -27,6 +28,7 @@ export function AppShell({
   searchQuery,
   onSearchChange,
   onSignOut,
+  notificationCenter,
 }: AppShellProps) {
   return (
     <div className="app-shell">
@@ -51,6 +53,7 @@ export function AppShell({
           onSearchChange={onSearchChange}
           onSignOut={onSignOut}
           searchQuery={searchQuery}
+          notificationCenter={notificationCenter}
         />
         <main className="main-content">{children}</main>
       </div>

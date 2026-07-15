@@ -158,6 +158,10 @@ describe('CalloraApiClient report downloads', () => {
   })
 })
 
+describe('CalloraApiClient notification inbox',()=>{
+  it('loads and marks tenant notifications read',async()=>{const fetcher=vi.fn().mockResolvedValueOnce(jsonResponse({ok:true,data:{items:[],unreadCount:2}})).mockResolvedValueOnce(jsonResponse({ok:true,data:{id:'note/one',event:'export_ready',title:'Ready',body:'Done',createdAt:'2026-07-15T00:00:00.000Z',readAt:'2026-07-15T01:00:00.000Z'}}));const client=new CalloraApiClient({fetcher:fetcher as typeof fetch});expect((await client.getNotificationInbox('access')).unreadCount).toBe(2);await client.markNotificationRead('note/one','access');expect(String(fetcher.mock.calls[1][0])).toContain('/v1/notifications/note%2Fone/read');expect(fetcher.mock.calls[1][1]?.method).toBe('POST')})
+})
+
 describe('CalloraApiClient lead CRM routes', () => {
   it('encodes lead list filters and uses scoped metadata routes', async () => {
     const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => jsonResponse({ ok: true, data: {

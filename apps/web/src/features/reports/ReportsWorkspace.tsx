@@ -14,6 +14,7 @@ interface ReportsWorkspaceProps {
   onAuthenticationFailure: (reason: AuthorizationFailure) => void
   onNotify: (message: string) => void
   searchQuery: string
+  initialView?: 'performance' | 'automation'
 }
 
 function twoDigits(value: number): string {
@@ -78,8 +79,8 @@ function reportCsv(report: LeadReport): string {
   return `${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`
 }
 
-export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotify, searchQuery }: ReportsWorkspaceProps) {
-  const [activeView, setActiveView] = useState<'performance' | 'automation'>('performance')
+export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotify, searchQuery, initialView='performance' }: ReportsWorkspaceProps) {
+  const [activeView, setActiveView] = useState<'performance' | 'automation'>(initialView)
   const [client] = useState(() => new CalloraApiClient({ authMode: authSession.mode }))
   const [filters, setFilters] = useState<LeadReportFilterDraft>(initialFilters)
   const [appliedFilters, setAppliedFilters] = useState<LeadReportFilterDraft>(initialFilters)

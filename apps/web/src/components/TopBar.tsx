@@ -1,4 +1,5 @@
-import { Bell, CalendarDays, ChevronDown, Menu, Phone, Search } from 'lucide-react'
+import { CalendarDays, ChevronDown, Menu, Phone, Search } from 'lucide-react'
+import type { ReactNode } from 'react'
 
 interface TopBarProps {
   displayName: string
@@ -6,9 +7,10 @@ interface TopBarProps {
   onSignOut?: () => void
   searchQuery: string
   onSearchChange: (value: string) => void
+  notificationCenter?: ReactNode
 }
 
-export function TopBar({ displayName, onMenuClick, onSignOut, searchQuery, onSearchChange }: TopBarProps) {
+export function TopBar({ displayName, onMenuClick, onSignOut, searchQuery, onSearchChange, notificationCenter }: TopBarProps) {
   const firstName = displayName.trim().split(/\s+/)[0] || 'there'
   const initials = displayName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || 'U'
   return (
@@ -39,10 +41,7 @@ export function TopBar({ displayName, onMenuClick, onSignOut, searchQuery, onSea
           <span>14 Jul 2026</span>
           <ChevronDown size={15} />
         </button>
-        <button aria-label="Notifications, 3 unread" className="icon-button notification-button" type="button">
-          <Bell size={20} />
-          <span>3</span>
-        </button>
+        {notificationCenter}
         <button
           aria-label={onSignOut ? `Sign out ${displayName}` : 'Open profile menu'}
           className="profile-button"

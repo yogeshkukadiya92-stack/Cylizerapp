@@ -4,6 +4,8 @@ import type { AuthSession, AuthUserSummary } from './auth/types'
 import { useAuth } from './auth/useAuth'
 import type { AuthorizationFailure } from './auth/useAuth'
 import { AppShell } from './components/AppShell'
+import { NotificationCenter } from './components/NotificationCenter'
+import { CalloraApiClient } from './api/client'
 import { AuthGate } from './components/AuthGate'
 import { DashboardWorkspace } from './components/DashboardWorkspace'
 import { ModulePreview } from './components/ModulePreview'
@@ -23,6 +25,8 @@ function DashboardApplication({ authSession, authUser, onAuthenticationFailure, 
   const [searchQuery, setSearchQuery] = useState('')
   const [isSidebarOpen, setSidebarOpen] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
+  const [reportsInitialView, setReportsInitialView] = useState<'performance'|'automation'>('performance')
+  const [notificationClient] = useState(() => new CalloraApiClient({ authMode: authSession.mode }))
 
   useEffect(() => {
     if (!toast) return undefined
@@ -42,6 +46,7 @@ function DashboardApplication({ authSession, authUser, onAuthenticationFailure, 
   }, [])
 
   const changeModule = (module: AppModule) => {
+    if(module==='Reports')setReportsInitialView('performance')
     setActiveModule(module)
     setSearchQuery('')
   }
@@ -57,6 +62,7 @@ function DashboardApplication({ authSession, authUser, onAuthenticationFailure, 
       onSidebarClose={() => setSidebarOpen(false)}
       onSidebarOpen={() => setSidebarOpen(true)}
       searchQuery={searchQuery}
+      notificationCenter={<NotificationCenter authSession={authSession} client={notificationClient} onNotify={setToast} onOpenReports={()=>{setReportsInitialView('automation');setActiveModule('Reports');setSearchQuery('')}}/>}
     >
       {activeModule === 'Dashboard' ? (
         <DashboardWorkspace
@@ -79,6 +85,7 @@ function DashboardApplication({ authSession, authUser, onAuthenticationFailure, 
           onAuthenticationFailure={onAuthenticationFailure}
           onNotify={setToast}
           searchQuery={searchQuery}
+          initialView={reportsInitialView}
         />
       ) : (
         <ModulePreview module={activeModule} onBack={() => setActiveModule('Dashboard')} />
