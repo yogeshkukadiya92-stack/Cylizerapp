@@ -1,0 +1,31 @@
+{
+  "name": "callora",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @callora/web",
+    "dev:web": "npm run dev --workspace @callora/web",
+    "dev:api": "npm run dev --workspace @callora/api",
+    "build": "npm run build --workspace @callora/contracts && npm run build --workspace @callora/api && npm run build --workspace @callora/web",
+    "typecheck": "npm run build --workspace @callora/contracts && npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "db:verify": "npm run verify --workspace @callora/database",
+    "db:migrate": "npm run migrate --workspace @callora/database",
+    "db:seed": "npm run seed --workspace @callora/database",
+    "release:db:verify": "npm run verify:phase3d --workspace @callora/database",
+    "release:preflight:test": "node --test scripts/phase3d-release-preflight.test.mjs",
+    "release:preflight:config": "node scripts/phase3d-release-preflight.mjs --config",
+    "release:preflight:network": "node scripts/phase3d-release-preflight.mjs --network",
+    "release:preflight:android": "node scripts/phase3d-release-preflight.mjs --android",
+    "release:preflight:all": "node scripts/phase3d-release-preflight.mjs --all",
+    "android:check": "cd apps/android && ./gradlew :app:testDemoDebugUnitTest :app:testEnterpriseDebugUnitTest :app:assembleDemoDebug :app:assembleEnterpriseDebug :app:lintDemoDebug :app:lintEnterpriseDebug --console=plain",
+    "check": "npm run db:verify && npm run release:preflight:test && npm run typecheck && npm run test && npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

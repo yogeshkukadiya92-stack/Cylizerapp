@@ -1,0 +1,43 @@
+node_modules/
+dist/
+.DS_Store
+Thumbs.db
+coverage/
+*.log
+*.tsbuildinfo
+.vscode/
+.fleet/
+.env
+.env.*
+!.env.example
+apps/web/public/design-reference.png
+apps/web/vite.config.js
+apps/web/vite.config.d.ts
+apps/web/vitest.config.js
+apps/web/vitest.config.d.ts
+
+# Android / Gradle local state
+.gradle/
+**/build/
+local.properties
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local QA evidence, generated deliverables, and debug APKs are not source.
+/work/
+/outputs/
+
+# Release signing material must stay outside the repository.
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.p8
+*.mobileprovision
+keystore.properties
+google-services.json
+GoogleService-Info.plist

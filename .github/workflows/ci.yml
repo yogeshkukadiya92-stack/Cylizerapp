@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify schema, tests, types, and builds
+        run: npm run check
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify native Android flavors
+        working-directory: apps/android
+        run: ./gradlew :app:testDemoDebugUnitTest :app:testEnterpriseDebugUnitTest :app:assembleDemoDebug :app:assembleEnterpriseDebug :app:lintDemoDebug :app:lintEnterpriseDebug --console=plain
+
+  postgres-phase3d:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["15", "16"]
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: phase3d-${{ github.run_id }}-${{ github.run_attempt }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      PHASE3D_POSTGRES_PASSWORD: phase3d-${{ github.run_id }}-${{ github.run_attempt }}
+      PHASE3D_MIGRATION_PASSWORD: migration-${{ github.run_id }}-${{ github.run_attempt }}
+      PHASE3D_RUNTIME_PASSWORD: runtime-${{ github.run_id }}-${{ github.run_attempt }}
+      PHASE3D_DATABASE_SSL_MODE: disable
+      PHASE3D_ALLOW_INSECURE_LOCALHOST: "true"
+      PGSSLMODE: disable
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install PostgreSQL client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Provision disposable source, restore, and runtime roles
+        run: |
+          echo "::add-mask::$PHASE3D_POSTGRES_PASSWORD"
+          echo "::add-mask::$PHASE3D_MIGRATION_PASSWORD"
+          echo "::add-mask::$PHASE3D_RUNTIME_PASSWORD"
+          export PGPASSWORD="$PHASE3D_POSTGRES_PASSWORD"
+          psql --no-psqlrc --set ON_ERROR_STOP=1 \
+            --host 127.0.0.1 --port 5432 --username postgres --dbname postgres \
+            --file packages/database/tests/phase3d-ci-bootstrap.sql
+
+      - name: Run live replay, RLS, concurrency, load, and restore gates
+        run: |
+          export PHASE3D_CONFIRM_DISPOSABLE=callora-phase3d-disposable-databases
+          export PHASE3D_MIGRATION_DATABASE_URL="postgresql://callora_phase3d_migration:${PHASE3D_MIGRATION_PASSWORD}@127.0.0.1:5432/callora_phase3d"
+          export PHASE3D_RUNTIME_DATABASE_URL="postgresql://callora_phase3d_runtime:${PHASE3D_RUNTIME_PASSWORD}@127.0.0.1:5432/callora_phase3d"
+          export PHASE3D_RESTORE_MIGRATION_DATABASE_URL="postgresql://callora_phase3d_migration:${PHASE3D_MIGRATION_PASSWORD}@127.0.0.1:5432/callora_phase3d_restore"
+          export PHASE3D_RESTORE_RUNTIME_DATABASE_URL="postgresql://callora_phase3d_runtime:${PHASE3D_RUNTIME_PASSWORD}@127.0.0.1:5432/callora_phase3d_restore"
+          export PHASE3D_EVIDENCE_DIR="$RUNNER_TEMP/phase3d-evidence"
+          export PHASE3D_LIMITER_CONCURRENCY=24
+          export PHASE3D_LOAD_REQUESTS=48
+          export PHASE3D_LOAD_CONCURRENCY=8
+          export PHASE3D_MAX_P95_MS=3000
+          npm run release:db:verify
+
+      - name: Upload sanitized Phase 3D database evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase3d-database-evidence-pg${{ matrix.postgres }}
+          path: ${{ runner.temp }}/phase3d-evidence/phase3d-database-evidence.json
+          if-no-files-found: error
+          retention-days: 14

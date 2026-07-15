@@ -1,0 +1,147 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "9249f7cb4f6be4cc65219a5ad13d50f4",
+    "entities": [
+      {
+        "tableName": "queued_calls",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`localId` TEXT NOT NULL, `nativeCallId` TEXT, `simCardId` TEXT, `encryptedPhoneNumber` TEXT NOT NULL, `encryptedContactName` TEXT, `direction` TEXT NOT NULL, `disposition` TEXT NOT NULL, `startedAtEpochMillis` INTEGER NOT NULL, `answeredAtEpochMillis` INTEGER, `endedAtEpochMillis` INTEGER, `durationSeconds` INTEGER NOT NULL, `ringDurationSeconds` INTEGER, `isInternal` INTEGER NOT NULL, `nativeLastModifiedAtEpochMillis` INTEGER, `status` TEXT NOT NULL, `attemptCount` INTEGER NOT NULL, `availableAtEpochMillis` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL, PRIMARY KEY(`localId`))",
+        "fields": [
+          {
+            "fieldPath": "localId",
+            "columnName": "localId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nativeCallId",
+            "columnName": "nativeCallId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "simCardId",
+            "columnName": "simCardId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "encryptedPhoneNumber",
+            "columnName": "encryptedPhoneNumber",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "encryptedContactName",
+            "columnName": "encryptedContactName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "disposition",
+            "columnName": "disposition",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedAtEpochMillis",
+            "columnName": "startedAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "answeredAtEpochMillis",
+            "columnName": "answeredAtEpochMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "endedAtEpochMillis",
+            "columnName": "endedAtEpochMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "durationSeconds",
+            "columnName": "durationSeconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ringDurationSeconds",
+            "columnName": "ringDurationSeconds",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "isInternal",
+            "columnName": "isInternal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nativeLastModifiedAtEpochMillis",
+            "columnName": "nativeLastModifiedAtEpochMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attemptCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "availableAtEpochMillis",
+            "columnName": "availableAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtEpochMillis",
+            "columnName": "createdAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "localId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_queued_calls_status_availableAtEpochMillis",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "availableAtEpochMillis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queued_calls_status_availableAtEpochMillis` ON `${TABLE_NAME}` (`status`, `availableAtEpochMillis`)"
+          },
+          {
+            "name": "index_queued_calls_startedAtEpochMillis",
+            "unique": false,
+            "columnNames": [
+              "startedAtEpochMillis"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queued_calls_startedAtEpochMillis` ON `${TABLE_NAME}` (`startedAtEpochMillis`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '9249f7cb4f6be4cc65219a5ad13d50f4')"
+    ]
+  }
+}
