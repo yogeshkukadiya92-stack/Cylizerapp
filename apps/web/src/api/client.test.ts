@@ -143,6 +143,21 @@ describe('CalloraApiClient transport security', () => {
   })
 })
 
+describe('CalloraApiClient report downloads', () => {
+  it('mints and redeems an authenticated one-time report grant', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ok: true, data: { token: 'clr_token', expiresAt: '2026-07-17T00:00:00.000Z' } }))
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ 'Content-Disposition': 'attachment; filename="report.csv"' }), blob: async () => new Blob(['calls\n12']) } as Response)
+    const client = new CalloraApiClient({ fetcher: fetcher as typeof fetch })
+    const grant = await client.issueReportDownloadToken('job/one', 'access')
+    const file = await client.downloadReport('job/one', grant.token, 'access')
+    expect(file.fileName).toBe('report.csv')
+    expect(String(fetcher.mock.calls[0][0])).toContain('/v1/report-downloads/job%2Fone/token')
+    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual({ token: 'clr_token' })
+    expect((fetcher.mock.calls[1][1]?.headers as Headers).get('Authorization')).toBe('Bearer access')
+  })
+})
+
 describe('CalloraApiClient lead CRM routes', () => {
   it('encodes lead list filters and uses scoped metadata routes', async () => {
     const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => jsonResponse({ ok: true, data: {

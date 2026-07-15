@@ -556,6 +556,14 @@ export class CalloraApiClient {
     return this.request('/v1/report-exports', { method: 'POST', body: JSON.stringify(input), accessToken, signal })
   }
 
+  issueReportDownloadToken(jobId: string, accessToken: string, signal?: AbortSignal): Promise<{ token: string; expiresAt: string }> {
+    return this.request(`/v1/report-downloads/${encodeURIComponent(jobId)}/token`, { method: 'POST', accessToken, signal })
+  }
+
+  downloadReport(jobId: string, token: string, accessToken: string, signal?: AbortSignal): Promise<DownloadedFile> {
+    return this.requestFile(`/v1/report-downloads/${encodeURIComponent(jobId)}/redeem`, { method: 'POST', body: JSON.stringify({ token }), headers: { 'Content-Type': 'application/json' }, accessToken, signal }, 'callora-report.csv')
+  }
+
   revokeDevice(
     deviceId: string,
     input: AdminDeviceRevocationInput,
