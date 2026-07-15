@@ -10,6 +10,7 @@ import type { ApiConfig } from "../src/config.js";
 import { loadConfig } from "../src/config.js";
 import { InMemoryCalloraRepository, SequentialIdGenerator, SequentialPairingCodeGenerator } from "../src/repository.js";
 import type { Clock } from "../src/security.js";
+import { createDownloadToken, hashDownloadToken } from "../src/report-workflows.js";
 
 class MutableClock implements Clock {
   constructor(private value: Date) {}
@@ -1568,6 +1569,43 @@ describe("Callora API", () => {
       const items = json<SuccessPayload<{ items: Array<{ action: string; organizationId: string }> }>>(response).data.items;
       expect(items.map((event) => event.action)).toEqual(expect.arrayContaining(["call.ingested", "employee.created"]));
       expect(items.every((event) => event.organizationId === "org_alpha")).toBe(true);
+    });
+  });
+
+  describe("report automation", () => {
+    it("persists saved views, schedules, preferences, and queued exports per tenant", async () => {
+      const token = await session(app);
+      const viewResponse = await app.inject({ method: "POST", url: "/v1/report-views", headers: authorization(token), payload: { name: "Manager lead view", kind: "lead_performance", filters: { period: "this_month" } } });
+      expect(viewResponse.statusCode).toBe(201);
+      const view = json<SuccessPayload<{ id: string }>>(viewResponse).data;
+      const scheduleResponse = await app.inject({ method: "POST", url: "/v1/report-schedules", headers: authorization(token), payload: { savedViewId: view.id, name: "Daily manager report", cadence: "daily", localTime: "08:00", format: "pdf", recipients: ["manager@example.com"] } });
+      expect(scheduleResponse.statusCode).toBe(201);
+      const schedule = json<SuccessPayload<{ id: string }>>(scheduleResponse).data;
+      const paused = await app.inject({ method: "PATCH", url: `/v1/report-schedules/${schedule.id}`, headers: authorization(token), payload: { status: "paused" } });
+      expect(json<SuccessPayload<{ status: string }>>(paused).data.status).toBe("paused");
+      const preferences = ["missed_call","overdue_follow_up","device_offline","import_completed","export_ready"].map((event) => ({ event, email: event !== "import_completed", inApp: true }));
+      const preferenceResponse = await app.inject({ method: "PUT", url: "/v1/notification-preferences", headers: authorization(token), payload: { preferences } });
+      expect(preferenceResponse.statusCode).toBe(200);
+      const exportResponse = await app.inject({ method: "POST", url: "/v1/report-exports", headers: authorization(token), payload: { kind: "lead_performance", format: "xlsx", parameters: { period: "this_month" } } });
+      expect(exportResponse.statusCode).toBe(202);
+      const exportJob=json<SuccessPayload<{id:string}>>(exportResponse).data; const downloadToken=createDownloadToken(); expect(await repository.completeReportExportJob({organizationId:"org_alpha",jobId:exportJob.id,objectKey:"reports/org_alpha/export.xlsx",tokenHash:hashDownloadToken(downloadToken),expiresAt:"2026-07-16T12:00:00.000Z",at:"2026-07-14T12:05:00.000Z"})).toBe(true);
+      const redemption=await app.inject({method:"POST",url:`/v1/report-downloads/${exportJob.id}/redeem`,headers:authorization(token),payload:{token:downloadToken}}); expect(redemption.statusCode).toBe(200); expect(json<SuccessPayload<{objectKey:string}>>(redemption).data.objectKey).toBe("reports/org_alpha/export.xlsx");
+      const replay=await app.inject({method:"POST",url:`/v1/report-downloads/${exportJob.id}/redeem`,headers:authorization(token),payload:{token:downloadToken}}); expect(replay.statusCode).toBe(404);
+      const snapshot = await app.inject({ method: "GET", url: "/v1/report-automation", headers: authorization(token) });
+      const data = json<SuccessPayload<{ savedViews: unknown[]; schedules: Array<{ status: string }>; preferences: unknown[]; jobs: unknown[] }>>(snapshot).data;
+      expect(data.savedViews).toHaveLength(1); expect(data.schedules).toHaveLength(1); expect(data.schedules[0]!.status).toBe("paused"); expect(data.preferences).toHaveLength(5); expect(data.jobs).toHaveLength(1);
+      const betaToken = await session(app, "org_beta", "owner");
+      const beta = await app.inject({ method: "GET", url: "/v1/report-automation", headers: authorization(betaToken) });
+      expect(json<SuccessPayload<{ savedViews: unknown[]; schedules: unknown[]; jobs: unknown[] }>>(beta).data).toMatchObject({ savedViews: [], schedules: [], jobs: [] });
+    });
+
+    it("rejects malformed schedules and report exports without permission", async () => {
+      const token = await session(app);
+      const invalid = await app.inject({ method: "POST", url: "/v1/report-schedules", headers: authorization(token), payload: { savedViewId: "missing", name: "Bad", cadence: "weekly", weekDay: 9, localTime: "99:00", format: "pdf", recipients: ["bad"] } });
+      expect(invalid.statusCode).toBe(400);
+      const employee = await session(app, "org_alpha", "employee");
+      const forbiddenExport = await app.inject({ method: "POST", url: "/v1/report-exports", headers: authorization(employee), payload: { kind: "lead_performance", format: "csv" } });
+      expect(forbiddenExport.statusCode).toBe(403);
     });
   });
 });

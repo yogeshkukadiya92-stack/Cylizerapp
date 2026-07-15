@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -47,6 +48,10 @@ import {
   type JsonValue,
   type LeadImportPreview,
   type LeadReportFilter,
+  type NotificationEvent,
+  type NotificationPreference,
+  type ReportFormat,
+  type ReportKind,
   type LeadTemperature,
   type Permission,
   type SystemRoleKey,
@@ -54,6 +59,7 @@ import {
   type UpdateLeadRequest,
 } from "@callora/contracts";
 import { buildDashboardOverview, type DashboardPreset, type DashboardQuery } from "./analytics.js";
+import { hashDownloadToken } from "./report-workflows.js";
 import {
   OidcBearerVerificationError,
   type OidcBearerVerifier,
@@ -150,6 +156,23 @@ function integerQuery(value: unknown, field: string, fallback: number, maximum: 
     throw badRequest(`${field} must be an integer between 1 and ${maximum}`, field);
   }
   return parsed;
+}
+
+const REPORT_KINDS: ReportKind[] = ["call_summary","employee_performance","client_activity","never_attended","client_not_pickup","lead_performance","lead_status","lead_not_contacted","status_change"];
+const REPORT_FORMATS: ReportFormat[] = ["csv","xlsx","pdf"];
+const NOTIFICATION_EVENTS: NotificationEvent[] = ["missed_call","overdue_follow_up","device_offline","import_completed","export_ready"];
+
+function stringArray(value: unknown, field: string, maximum = 50): string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > maximum) throw badRequest(`${field} must contain between 1 and ${maximum} values`, field);
+  return value.map((item, index) => requiredString(item, `${field}.${index}`, 320));
+}
+
+function reportKind(value: unknown): ReportKind {
+  const kind=requiredString(value,"kind",50) as ReportKind; if(!REPORT_KINDS.includes(kind)) throw badRequest("kind is unsupported","kind"); return kind;
+}
+
+function reportFormat(value: unknown): ReportFormat {
+  const format=requiredString(value,"format",10) as ReportFormat; if(!REPORT_FORMATS.includes(format)) throw badRequest("format is unsupported","format"); return format;
 }
 
 function currentActor(request: FastifyRequest): ActorContext {
@@ -1418,6 +1441,49 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       at: clock.now().toISOString(),
     });
     return success(request, report);
+  });
+
+  app.get("/v1/report-automation", { preHandler: protect("reports.read") }, async (request) => {
+    const actor=currentActor(request); return success(request,await repository.getReportAutomation(actor.organization.id,actor.user.id));
+  });
+
+  app.post("/v1/report-views", { preHandler: protect("reports.read") }, async (request,reply) => {
+    const actor=currentActor(request); const body=bodyRecord(request); const filters=isRecord(body.filters)?body.filters:{};
+    const cleanFilters: Record<string,string|string[]>={}; for(const [key,value] of Object.entries(filters)){ if(typeof value==="string") cleanFilters[key]=value; else if(Array.isArray(value)&&value.every((item)=>typeof item==="string")) cleanFilters[key]=value; else throw badRequest("filters values must be strings or string arrays","filters"); }
+    const view=await repository.createSavedReportView({organizationId:actor.organization.id,userId:actor.user.id,name:requiredString(body.name,"name",120),kind:reportKind(body.kind),filters:cleanFilters,at:clock.now().toISOString()}); reply.code(201); return success(request,view);
+  });
+
+  app.post("/v1/report-schedules", { preHandler: protect("reports.read") }, async (request,reply) => {
+    const actor=currentActor(request); const body=bodyRecord(request); const cadence=requiredString(body.cadence,"cadence",10); if(cadence!=="daily"&&cadence!=="weekly") throw badRequest("cadence must be daily or weekly","cadence");
+    const localTime=requiredString(body.localTime,"localTime",5); if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(localTime)) throw badRequest("localTime must use HH:mm","localTime");
+    const recipients=stringArray(body.recipients,"recipients"); if(recipients.some((email)=>!/^\S+@\S+\.\S+$/.test(email))) throw badRequest("recipients must contain valid email addresses","recipients");
+    const weekDay=cadence==="weekly"?Number(body.weekDay):undefined; if(cadence==="weekly"&&(!Number.isInteger(weekDay)||weekDay!<1||weekDay!>7)) throw badRequest("weekDay must be 1 through 7","weekDay");
+    const now=clock.now(); const next=new Date(now.getTime()+24*60*60*1000); const [hour,minute]=localTime.split(":").map(Number); next.setUTCHours(hour!-5,minute!-30,0,0); if(next<=now) next.setUTCDate(next.getUTCDate()+1);
+    const schedule=await repository.createReportSchedule({organizationId:actor.organization.id,userId:actor.user.id,savedViewId:requiredString(body.savedViewId,"savedViewId",100),name:requiredString(body.name,"name",120),cadence,...(weekDay===undefined?{}:{weekDay}),localTime,timeZone:actor.organization.settings.timeZone,format:reportFormat(body.format),recipients,nextRunAt:next.toISOString(),at:now.toISOString()}); if(!schedule) throw notFound("Saved report view not found"); reply.code(201); return success(request,schedule);
+  });
+
+  app.patch("/v1/report-schedules/:scheduleId", { preHandler: protect("reports.read") }, async (request) => {
+    const actor=currentActor(request); const params=isRecord(request.params)?request.params:{}; const body=bodyRecord(request); const status=requiredString(body.status,"status",10); if(status!=="active"&&status!=="paused") throw badRequest("status must be active or paused","status"); const schedule=await repository.updateReportSchedule({organizationId:actor.organization.id,scheduleId:requiredString(params.scheduleId,"scheduleId",100),status,at:clock.now().toISOString()}); if(!schedule) throw notFound("Report schedule not found"); return success(request,schedule);
+  });
+
+  app.put("/v1/notification-preferences", { preHandler: protect("reports.read") }, async (request) => {
+    const actor=currentActor(request); const body=bodyRecord(request); if(!Array.isArray(body.preferences)||body.preferences.length!==NOTIFICATION_EVENTS.length) throw badRequest("preferences must contain every notification event","preferences"); const seen=new Set<string>(); const preferences:NotificationPreference[]=body.preferences.map((raw,index)=>{if(!isRecord(raw)||!NOTIFICATION_EVENTS.includes(raw.event as NotificationEvent)||typeof raw.email!=="boolean"||typeof raw.inApp!=="boolean") throw badRequest("preference is invalid",`preferences.${index}`); if(seen.has(String(raw.event))) throw badRequest("notification events must be unique","preferences"); seen.add(String(raw.event)); return {event:raw.event as NotificationEvent,email:raw.email,inApp:raw.inApp};}); return success(request,{preferences:await repository.updateNotificationPreferences({organizationId:actor.organization.id,userId:actor.user.id,preferences,at:clock.now().toISOString()})});
+  });
+
+  app.post("/v1/report-exports", { preHandler: protect("reports.export") }, async (request,reply) => {
+    const actor=currentActor(request); const body=bodyRecord(request); const job=await repository.createReportExportJob({organizationId:actor.organization.id,userId:actor.user.id,kind:reportKind(body.kind),format:reportFormat(body.format),parameters:isRecord(body.parameters)?body.parameters:{},at:clock.now().toISOString()}); reply.code(202); return success(request,job);
+  });
+
+  app.post("/v1/report-downloads/:jobId/redeem", { preHandler: protect("reports.export") }, async (request) => {
+    const actor=currentActor(request); const params=isRecord(request.params)?request.params:{}; const body=bodyRecord(request); let tokenHash:Buffer; try{tokenHash=hashDownloadToken(requiredString(body.token,"token",100));}catch{throw badRequest("The download token is invalid","token");} const grant=await repository.redeemReportDownload({organizationId:actor.organization.id,userId:actor.user.id,jobId:requiredString(params.jobId,"jobId",100),tokenHash,redemptionId:randomUUID(),at:clock.now().toISOString()}); if(!grant)throw notFound("The report download is unavailable, expired, or already redeemed"); return success(request,grant);
+  });
+
+  app.get("/v1/notifications", { preHandler: protect("reports.read") }, async (request) => {
+    const actor=currentActor(request); const query=queryRecord(request); return success(request,await repository.listNotificationInbox(actor.organization.id,actor.user.id,integerQuery(query.limit,"limit",25,100)));
+  });
+
+  app.post("/v1/notifications/:notificationId/read", { preHandler: protect("reports.read") }, async (request) => {
+    const actor=currentActor(request); const params=isRecord(request.params)?request.params:{}; const notification=await repository.markNotificationRead({organizationId:actor.organization.id,userId:actor.user.id,notificationId:requiredString(params.notificationId,"notificationId",100),at:clock.now().toISOString()}); if(!notification)throw notFound("Notification not found"); return success(request,notification);
   });
 
   app.post("/v1/employees/:employeeId/pairing-codes", { preHandler: protectOrganizationAdmin("devices.manage") }, async (request, reply) => {

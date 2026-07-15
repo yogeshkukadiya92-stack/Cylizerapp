@@ -27,6 +27,13 @@ import {
   CorrectCallLeadLinkResult,
   MobileLeadUpdateReceipt,
   LeadReport,
+  ReportAutomationSnapshot,
+  SavedReportView,
+  ReportSchedule,
+  NotificationPreference,
+  ReportExportJob,
+  InAppNotification,
+  NotificationInbox,
   LeadSource,
   OrganizationId,
   SystemRoleKey,
@@ -4122,6 +4129,71 @@ export class PostgresCalloraRepository implements CalloraRepository {
         metricDefinitionVersion: "2026-07-15",
       };
     });
+  }
+
+  async getReportAutomation(organizationId: OrganizationId, userId: string): Promise<ReportAutomationSnapshot> {
+    if (!isCanonicalUuid(organizationId) || !isCanonicalUuid(userId)) return { savedViews: [], schedules: [], preferences: [], jobs: [] };
+    return this.withTenant(organizationId, userId, async (client) => {
+      const [views, schedules, preferences, jobs] = await Promise.all([
+        client.query<DbRow>(`select * from callora.saved_report_views where organization_id=$1::uuid and owner_user_id=$2::uuid order by updated_at desc`, [organizationId, userId]),
+        client.query<DbRow>(`select * from callora.report_schedules where organization_id=$1::uuid order by next_run_at, id`, [organizationId]),
+        client.query<DbRow>(`select * from callora.notification_preferences where organization_id=$1::uuid and user_id=$2::uuid order by event_key`, [organizationId, userId]),
+        client.query<DbRow>(`select * from callora.report_export_jobs where organization_id=$1::uuid and requested_by_user_id=$2::uuid order by requested_at desc limit 25`, [organizationId, userId]),
+      ]);
+      return {
+        savedViews: views.rows.map((row) => ({ id: String(row.id), organizationId: String(row.organization_id), ownerUserId: String(row.owner_user_id), name: String(row.name), kind: String(row.report_kind) as SavedReportView["kind"], filters: row.filters as SavedReportView["filters"], createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() })),
+        schedules: schedules.rows.map((row) => ({ id: String(row.id), organizationId: String(row.organization_id), savedViewId: String(row.saved_view_id), name: String(row.name), cadence: String(row.cadence) as ReportSchedule["cadence"], ...(row.week_day === null ? {} : { weekDay: Number(row.week_day) }), localTime: String(row.local_time).slice(0,5), timeZone: String(row.time_zone), format: String(row.format) as ReportSchedule["format"], recipients: row.recipients as string[], status: String(row.status) as ReportSchedule["status"], nextRunAt: new Date(String(row.next_run_at)).toISOString(), ...(row.last_run_at === null ? {} : { lastRunAt: new Date(String(row.last_run_at)).toISOString() }) })),
+        preferences: preferences.rows.map((row) => ({ event: String(row.event_key) as NotificationPreference["event"], email: row.email_enabled === true, inApp: row.in_app_enabled === true })),
+        jobs: jobs.rows.map((row) => ({ id: String(row.id), kind: String(row.report_kind) as ReportExportJob["kind"], format: String(row.format) as ReportExportJob["format"], status: String(row.status) as ReportExportJob["status"], requestedAt: new Date(String(row.requested_at)).toISOString(), ...(row.completed_at === null ? {} : { completedAt: new Date(String(row.completed_at)).toISOString() }), ...(row.download_expires_at === null ? {} : { expiresAt: new Date(String(row.download_expires_at)).toISOString() }), ...(row.failure_message === null ? {} : { failureMessage: String(row.failure_message) }) })),
+      };
+    });
+  }
+
+  async createSavedReportView(options: { organizationId: OrganizationId; userId: string; name: string; kind: SavedReportView["kind"]; filters: SavedReportView["filters"]; at: string }): Promise<SavedReportView> {
+    const id = randomUUID();
+    return this.withTenant(options.organizationId, options.userId, async (client) => {
+      await client.query(`insert into callora.saved_report_views (organization_id,id,owner_user_id,name,report_kind,filters,created_at,updated_at) values ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::jsonb,$7::timestamptz,$7::timestamptz)`, [options.organizationId,id,options.userId,options.name,options.kind,JSON.stringify(options.filters),options.at]);
+      return { id, organizationId: options.organizationId, ownerUserId: options.userId, name: options.name, kind: options.kind, filters: options.filters, createdAt: options.at, updatedAt: options.at };
+    });
+  }
+
+  async createReportSchedule(options: { organizationId: OrganizationId; userId: string; savedViewId: string; name: string; cadence: ReportSchedule["cadence"]; weekDay?: number; localTime: string; timeZone: string; format: ReportSchedule["format"]; recipients: string[]; nextRunAt: string; at: string }): Promise<ReportSchedule | undefined> {
+    if (!isCanonicalUuid(options.savedViewId)) return undefined;
+    const id=randomUUID();
+    return this.withTenant(options.organizationId, options.userId, async (client) => {
+      const result=await client.query<DbRow>(`insert into callora.report_schedules (organization_id,id,saved_view_id,created_by_user_id,name,cadence,week_day,local_time,time_zone,format,recipients,next_run_at,created_at,updated_at) select $1::uuid,$2::uuid,id,$3::uuid,$4,$5,$6::smallint,$7::time,$8,$9,$10::jsonb,$11::timestamptz,$12::timestamptz,$12::timestamptz from callora.saved_report_views where organization_id=$1::uuid and id=$13::uuid returning id`, [options.organizationId,id,options.userId,options.name,options.cadence,options.weekDay??null,options.localTime,options.timeZone,options.format,JSON.stringify(options.recipients),options.nextRunAt,options.at,options.savedViewId]);
+      if(result.rows.length!==1) return undefined;
+      return { id, organizationId:options.organizationId,savedViewId:options.savedViewId,name:options.name,cadence:options.cadence,...(options.weekDay===undefined?{}:{weekDay:options.weekDay}),localTime:options.localTime,timeZone:options.timeZone,format:options.format,recipients:options.recipients,status:"active",nextRunAt:options.nextRunAt };
+    });
+  }
+
+  async updateReportSchedule(options: { organizationId: OrganizationId; scheduleId: string; status: ReportSchedule["status"]; at: string }): Promise<ReportSchedule | undefined> {
+    if(!isCanonicalUuid(options.scheduleId)) return undefined;
+    return this.withTenant(options.organizationId, undefined, async(client)=>{ const result=await client.query<DbRow>(`update callora.report_schedules set status=$3,updated_at=$4::timestamptz where organization_id=$1::uuid and id=$2::uuid returning *`,[options.organizationId,options.scheduleId,options.status,options.at]); const row=result.rows[0]; if(!row)return undefined; return {id:String(row.id),organizationId:String(row.organization_id),savedViewId:String(row.saved_view_id),name:String(row.name),cadence:String(row.cadence) as ReportSchedule["cadence"],...(row.week_day===null?{}:{weekDay:Number(row.week_day)}),localTime:String(row.local_time).slice(0,5),timeZone:String(row.time_zone),format:String(row.format) as ReportSchedule["format"],recipients:row.recipients as string[],status:String(row.status) as ReportSchedule["status"],nextRunAt:new Date(String(row.next_run_at)).toISOString()}; });
+  }
+
+  async updateNotificationPreferences(options: { organizationId: OrganizationId; userId: string; preferences: NotificationPreference[]; at: string }): Promise<NotificationPreference[]> {
+    return this.withTenant(options.organizationId,options.userId,async(client)=>{ for(const item of options.preferences){await client.query(`insert into callora.notification_preferences (organization_id,user_id,event_key,email_enabled,in_app_enabled,updated_at) values ($1::uuid,$2::uuid,$3,$4,$5,$6::timestamptz) on conflict (organization_id,user_id,event_key) do update set email_enabled=excluded.email_enabled,in_app_enabled=excluded.in_app_enabled,updated_at=excluded.updated_at`,[options.organizationId,options.userId,item.event,item.email,item.inApp,options.at]);} return options.preferences; });
+  }
+
+  async createReportExportJob(options: { organizationId: OrganizationId; userId: string; kind: ReportExportJob["kind"]; format: ReportExportJob["format"]; parameters: Record<string, unknown>; at: string }): Promise<ReportExportJob> {
+    const id=randomUUID(); await this.withTenant(options.organizationId,options.userId,(client)=>client.query(`insert into callora.report_export_jobs (organization_id,id,requested_by_user_id,report_kind,format,parameters,requested_at) values ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::jsonb,$7::timestamptz)`,[options.organizationId,id,options.userId,options.kind,options.format,JSON.stringify(options.parameters),options.at])); return {id,kind:options.kind,format:options.format,status:"queued",requestedAt:options.at};
+  }
+
+  async completeReportExportJob(options: { organizationId: OrganizationId; jobId: string; objectKey: string; tokenHash: Uint8Array; expiresAt: string; at: string }): Promise<boolean> {
+    if(!isCanonicalUuid(options.jobId)||options.tokenHash.length!==32)return false; return this.withTenant(options.organizationId,undefined,async(client)=>{const result=await client.query<DbRow>(`update callora.report_export_jobs set status='ready',object_key=$3,download_token_hash=$4::bytea,download_expires_at=$5::timestamptz,completed_at=$6::timestamptz,lease_owner=null,lease_expires_at=null where organization_id=$1::uuid and id=$2::uuid and status in ('queued','processing') returning id`,[options.organizationId,options.jobId,options.objectKey,Buffer.from(options.tokenHash),options.expiresAt,options.at]);return result.rows.length===1;});
+  }
+
+  async redeemReportDownload(options: { organizationId: OrganizationId; userId: string; jobId: string; tokenHash: Uint8Array; redemptionId: string; at: string }): Promise<{ objectKey: string; expiresAt: string } | undefined> {
+    if(!isCanonicalUuid(options.jobId)||!isCanonicalUuid(options.redemptionId)||options.tokenHash.length!==32)return undefined; return this.withTenant(options.organizationId,options.userId,async(client)=>{const result=await client.query<DbRow>(`with eligible as (select object_key,download_expires_at from callora.report_export_jobs j where j.organization_id=$1::uuid and j.id=$2::uuid and j.requested_by_user_id=$3::uuid and j.status='ready' and j.download_expires_at>$4::timestamptz and j.download_token_hash=$5::bytea and not exists (select 1 from callora.report_download_redemptions r where r.organization_id=j.organization_id and r.report_export_job_id=j.id) for update), redeemed as (insert into callora.report_download_redemptions (organization_id,id,report_export_job_id,redeemed_by_user_id,token_fingerprint,redeemed_at) select $1::uuid,$6::uuid,$2::uuid,$3::uuid,$5::bytea,$4::timestamptz from eligible returning id) select object_key,download_expires_at from eligible where exists(select 1 from redeemed)`,[options.organizationId,options.jobId,options.userId,options.at,Buffer.from(options.tokenHash),options.redemptionId]);const row=result.rows[0];return row?{objectKey:String(row.object_key),expiresAt:new Date(String(row.download_expires_at)).toISOString()}:undefined;});
+  }
+
+  async listNotificationInbox(organizationId: OrganizationId, userId: string, limit: number): Promise<NotificationInbox> {
+    if(!isCanonicalUuid(organizationId)||!isCanonicalUuid(userId))return{items:[],unreadCount:0}; const bounded=boundedInteger(limit,1,100,"limit"); return this.withTenant(organizationId,userId,async(client)=>{const [items,count]=await Promise.all([client.query<DbRow>(`select id,event_key,title,body,action_url,created_at,read_at from callora.in_app_notifications where organization_id=$1::uuid and user_id=$2::uuid order by created_at desc,id desc limit $3::integer`,[organizationId,userId,bounded]),client.query<DbRow>(`select count(*)::integer as count from callora.in_app_notifications where organization_id=$1::uuid and user_id=$2::uuid and read_at is null`,[organizationId,userId])]);return{items:items.rows.map((row)=>({id:String(row.id),event:String(row.event_key) as InAppNotification["event"],title:String(row.title),body:String(row.body),...(row.action_url===null?{}:{actionUrl:String(row.action_url)}),createdAt:new Date(String(row.created_at)).toISOString(),...(row.read_at===null?{}:{readAt:new Date(String(row.read_at)).toISOString()})})),unreadCount:Number(count.rows[0]?.count??0)};});
+  }
+
+  async markNotificationRead(options: { organizationId: OrganizationId; userId: string; notificationId: string; at: string }): Promise<InAppNotification | undefined> {
+    if(!isCanonicalUuid(options.notificationId))return undefined;return this.withTenant(options.organizationId,options.userId,async(client)=>{const result=await client.query<DbRow>(`update callora.in_app_notifications set read_at=coalesce(read_at,$4::timestamptz) where organization_id=$1::uuid and user_id=$2::uuid and id=$3::uuid returning id,event_key,title,body,action_url,created_at,read_at`,[options.organizationId,options.userId,options.notificationId,options.at]);const row=result.rows[0];return row?{id:String(row.id),event:String(row.event_key) as InAppNotification["event"],title:String(row.title),body:String(row.body),...(row.action_url===null?{}:{actionUrl:String(row.action_url)}),createdAt:new Date(String(row.created_at)).toISOString(),readAt:new Date(String(row.read_at)).toISOString()}:undefined;});
   }
 
   async findDevice(organizationId: OrganizationId, deviceId: string): Promise<EmployeeDevice | undefined> {

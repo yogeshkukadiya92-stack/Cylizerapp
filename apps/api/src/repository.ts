@@ -25,6 +25,13 @@ import type {
   CorrectCallLeadLinkResult,
   MobileLeadUpdateReceipt,
   LeadReport,
+  ReportAutomationSnapshot,
+  SavedReportView,
+  ReportSchedule,
+  NotificationPreference,
+  ReportExportJob,
+  InAppNotification,
+  NotificationInbox,
   Organization,
   OrganizationId,
   Role,
@@ -175,6 +182,16 @@ export interface CalloraRepository {
   correctCallLeadLink(options: CorrectCallLeadLinkOptions): Promise<CorrectCallLeadLinkResult | undefined>;
   applyMobileLeadUpdate(options: MobileLeadUpdateOptions): Promise<MobileLeadUpdateReceipt | undefined>;
   getLeadReport(options: LeadReportOptions): Promise<LeadReport>;
+  getReportAutomation(organizationId: OrganizationId, userId: string): Promise<ReportAutomationSnapshot>;
+  createSavedReportView(options: { organizationId: OrganizationId; userId: string; name: string; kind: SavedReportView["kind"]; filters: SavedReportView["filters"]; at: string }): Promise<SavedReportView>;
+  createReportSchedule(options: { organizationId: OrganizationId; userId: string; savedViewId: string; name: string; cadence: ReportSchedule["cadence"]; weekDay?: number; localTime: string; timeZone: string; format: ReportSchedule["format"]; recipients: string[]; nextRunAt: string; at: string }): Promise<ReportSchedule | undefined>;
+  updateReportSchedule(options: { organizationId: OrganizationId; scheduleId: string; status: ReportSchedule["status"]; at: string }): Promise<ReportSchedule | undefined>;
+  updateNotificationPreferences(options: { organizationId: OrganizationId; userId: string; preferences: NotificationPreference[]; at: string }): Promise<NotificationPreference[]>;
+  createReportExportJob(options: { organizationId: OrganizationId; userId: string; kind: ReportExportJob["kind"]; format: ReportExportJob["format"]; parameters: Record<string, unknown>; at: string }): Promise<ReportExportJob>;
+  completeReportExportJob(options: { organizationId: OrganizationId; jobId: string; objectKey: string; tokenHash: Uint8Array; expiresAt: string; at: string }): Promise<boolean>;
+  redeemReportDownload(options: { organizationId: OrganizationId; userId: string; jobId: string; tokenHash: Uint8Array; redemptionId: string; at: string }): Promise<{ objectKey: string; expiresAt: string } | undefined>;
+  listNotificationInbox(organizationId: OrganizationId, userId: string, limit: number): Promise<NotificationInbox>;
+  markNotificationRead(options: { organizationId: OrganizationId; userId: string; notificationId: string; at: string }): Promise<InAppNotification | undefined>;
   findDevice(organizationId: OrganizationId, deviceId: string): Promise<EmployeeDevice | undefined>;
   revokeDeviceByAdministrator(options: {
     organizationId: OrganizationId;
@@ -522,6 +539,12 @@ export class InMemoryCalloraRepository implements CalloraRepository {
   private readonly leadAssignmentRuleTeams = new Map<string, string>();
   private readonly leadAssignmentRuleCursors = new Map<string, number>();
   private readonly leadAssignmentApplyRequests = new Map<string, { fingerprint: string; result: ApplyLeadAssignmentRulesResult }>();
+  private readonly savedReportViews = new Map<string, SavedReportView>();
+  private readonly reportSchedules = new Map<string, ReportSchedule>();
+  private readonly notificationPreferences = new Map<string, NotificationPreference[]>();
+  private readonly reportExportJobs = new Map<string, ReportExportJob>();
+  private readonly reportArtifacts = new Map<string, { objectKey: string; tokenHash: Uint8Array; expiresAt: string; redeemedAt?: string }>();
+  private readonly inAppNotifications = new Map<string, InAppNotification & { organizationId: OrganizationId; userId: string }>();
   private readonly callLeadCorrectionRequests = new Map<string, { fingerprint: string; result: CorrectCallLeadLinkResult }>();
   private readonly mobileLeadUpdateRequests = new Map<string, {
     fingerprint: string;
@@ -2219,6 +2242,67 @@ export class InMemoryCalloraRepository implements CalloraRepository {
       timeZone: options.timeZone,
       metricDefinitionVersion: "2026-07-15",
     };
+  }
+
+  async getReportAutomation(organizationId: OrganizationId, userId: string): Promise<ReportAutomationSnapshot> {
+    const preferences = this.notificationPreferences.get(`${organizationId}:${userId}`) ?? [
+      "missed_call", "overdue_follow_up", "device_offline", "import_completed", "export_ready",
+    ].map((event) => ({ event: event as NotificationPreference["event"], email: true, inApp: true }));
+    return {
+      savedViews: clone([...this.savedReportViews.values()].filter((item) => item.organizationId === organizationId && item.ownerUserId === userId)),
+      schedules: clone([...this.reportSchedules.values()].filter((item) => item.organizationId === organizationId)),
+      preferences: clone(preferences),
+      jobs: clone([...this.reportExportJobs.values()].filter((item) => item.id.startsWith(`${organizationId}:`)).map((item) => ({ ...item, id: item.id.split(":").slice(1).join(":") }))),
+    };
+  }
+
+  async createSavedReportView(options: { organizationId: OrganizationId; userId: string; name: string; kind: SavedReportView["kind"]; filters: SavedReportView["filters"]; at: string }): Promise<SavedReportView> {
+    const view: SavedReportView = { id: this.ids.next("report_view"), organizationId: options.organizationId, ownerUserId: options.userId, name: options.name, kind: options.kind, filters: clone(options.filters), createdAt: options.at, updatedAt: options.at };
+    this.savedReportViews.set(view.id, view);
+    return clone(view);
+  }
+
+  async createReportSchedule(options: { organizationId: OrganizationId; userId: string; savedViewId: string; name: string; cadence: ReportSchedule["cadence"]; weekDay?: number; localTime: string; timeZone: string; format: ReportSchedule["format"]; recipients: string[]; nextRunAt: string; at: string }): Promise<ReportSchedule | undefined> {
+    const view = this.savedReportViews.get(options.savedViewId);
+    if (!view || view.organizationId !== options.organizationId) return undefined;
+    const schedule: ReportSchedule = { id: this.ids.next("report_schedule"), organizationId: options.organizationId, savedViewId: options.savedViewId, name: options.name, cadence: options.cadence, ...(options.weekDay === undefined ? {} : { weekDay: options.weekDay }), localTime: options.localTime, timeZone: options.timeZone, format: options.format, recipients: [...options.recipients], status: "active", nextRunAt: options.nextRunAt };
+    this.reportSchedules.set(schedule.id, schedule);
+    return clone(schedule);
+  }
+
+  async updateReportSchedule(options: { organizationId: OrganizationId; scheduleId: string; status: ReportSchedule["status"]; at: string }): Promise<ReportSchedule | undefined> {
+    const schedule = this.reportSchedules.get(options.scheduleId);
+    if (!schedule || schedule.organizationId !== options.organizationId) return undefined;
+    schedule.status = options.status;
+    return clone(schedule);
+  }
+
+  async updateNotificationPreferences(options: { organizationId: OrganizationId; userId: string; preferences: NotificationPreference[]; at: string }): Promise<NotificationPreference[]> {
+    this.notificationPreferences.set(`${options.organizationId}:${options.userId}`, clone(options.preferences));
+    return clone(options.preferences);
+  }
+
+  async createReportExportJob(options: { organizationId: OrganizationId; userId: string; kind: ReportExportJob["kind"]; format: ReportExportJob["format"]; parameters: Record<string, unknown>; at: string }): Promise<ReportExportJob> {
+    const publicId = this.ids.next("report_export");
+    const job: ReportExportJob = { id: `${options.organizationId}:${publicId}`, kind: options.kind, format: options.format, status: "queued", requestedAt: options.at };
+    this.reportExportJobs.set(job.id, job);
+    return { ...clone(job), id: publicId };
+  }
+
+  async completeReportExportJob(options: { organizationId: OrganizationId; jobId: string; objectKey: string; tokenHash: Uint8Array; expiresAt: string; at: string }): Promise<boolean> {
+    const key=`${options.organizationId}:${options.jobId}`; const job=this.reportExportJobs.get(key); if(!job||job.status!=="queued"&&job.status!=="processing")return false; job.status="ready"; job.completedAt=options.at; job.expiresAt=options.expiresAt; this.reportArtifacts.set(key,{objectKey:options.objectKey,tokenHash:new Uint8Array(options.tokenHash),expiresAt:options.expiresAt}); return true;
+  }
+
+  async redeemReportDownload(options: { organizationId: OrganizationId; userId: string; jobId: string; tokenHash: Uint8Array; redemptionId: string; at: string }): Promise<{ objectKey: string; expiresAt: string } | undefined> {
+    const artifact=this.reportArtifacts.get(`${options.organizationId}:${options.jobId}`); if(!artifact||artifact.redeemedAt||artifact.expiresAt<=options.at||artifact.tokenHash.length!==options.tokenHash.length)return undefined; let difference=0; for(let i=0;i<artifact.tokenHash.length;i+=1)difference|=artifact.tokenHash[i]!^options.tokenHash[i]!; if(difference!==0)return undefined; artifact.redeemedAt=options.at; return {objectKey:artifact.objectKey,expiresAt:artifact.expiresAt};
+  }
+
+  async listNotificationInbox(organizationId: OrganizationId, userId: string, limit: number): Promise<NotificationInbox> {
+    const all=[...this.inAppNotifications.values()].filter((item)=>item.organizationId===organizationId&&item.userId===userId).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)); return {items:clone(all.slice(0,limit).map(({organizationId:_o,userId:_u,...item})=>item)),unreadCount:all.filter((item)=>!item.readAt).length};
+  }
+
+  async markNotificationRead(options: { organizationId: OrganizationId; userId: string; notificationId: string; at: string }): Promise<InAppNotification | undefined> {
+    const item=this.inAppNotifications.get(options.notificationId); if(!item||item.organizationId!==options.organizationId||item.userId!==options.userId)return undefined; item.readAt??=options.at; const {organizationId:_o,userId:_u,...notification}=item; return clone(notification);
   }
 
   async findDevice(organizationId: OrganizationId, deviceId: string): Promise<EmployeeDevice | undefined> {

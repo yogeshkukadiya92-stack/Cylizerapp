@@ -27,6 +27,8 @@ test("migrations use a contiguous, deterministic order", () => {
     "0013_call_log_pii_concurrent_indexes.sql",
     "0014_lead_crm_foundation.sql",
     "0015_lead_operations.sql",
+    "0016_report_automation.sql",
+    "0017_report_delivery_workflows.sql",
   ]);
 });
 

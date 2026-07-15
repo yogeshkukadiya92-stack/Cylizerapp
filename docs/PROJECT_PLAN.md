@@ -250,6 +250,8 @@ Acceptance criteria:
 
 ### Phase 5 — Reports, notifications, and operational workflows, 3–4 weeks
 
+Status: **Phase 5C secure workflow foundation implemented** — saved views, schedules, preferences, export jobs, authenticated CRUD, report automation UI, due-schedule enqueue, single-use expiring download grants, delivery de-duplication/retry/suppression state, and inbox APIs are complete. Deployable render/provider workers and live provider/concurrency evidence continue in Phase 5D.
+
 Goal: make Callora useful without a manager continuously watching the dashboard.
 
 Deliverables:

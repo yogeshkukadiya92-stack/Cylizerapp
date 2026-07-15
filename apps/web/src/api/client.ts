@@ -19,6 +19,13 @@ import type {
   LeadImportResult,
   LeadReport,
   LeadReportFilter,
+  ReportAutomationSnapshot,
+  SavedReportView,
+  ReportSchedule,
+  NotificationPreference,
+  ReportExportJob,
+  CreateSavedReportViewInput,
+  CreateReportScheduleInput,
   Permission,
   PreviewLeadImportInput,
   UpdateLeadAssignmentRuleInput,
@@ -523,6 +530,30 @@ export class CalloraApiClient {
     if (query.team) search.set('team', query.team)
     if (query.source) search.set('source', query.source)
     return this.request(`/v1/lead-reports?${search.toString()}`, { accessToken, signal })
+  }
+
+  getReportAutomation(accessToken: string, signal?: AbortSignal): Promise<ReportAutomationSnapshot> {
+    return this.request('/v1/report-automation', { accessToken, signal })
+  }
+
+  createSavedReportView(input: CreateSavedReportViewInput, accessToken: string, signal?: AbortSignal): Promise<SavedReportView> {
+    return this.request('/v1/report-views', { method: 'POST', body: JSON.stringify(input), accessToken, signal })
+  }
+
+  createReportSchedule(input: CreateReportScheduleInput, accessToken: string, signal?: AbortSignal): Promise<ReportSchedule> {
+    return this.request('/v1/report-schedules', { method: 'POST', body: JSON.stringify(input), accessToken, signal })
+  }
+
+  updateReportSchedule(scheduleId: string, status: ReportSchedule['status'], accessToken: string, signal?: AbortSignal): Promise<ReportSchedule> {
+    return this.request(`/v1/report-schedules/${encodeURIComponent(scheduleId)}`, { method: 'PATCH', body: JSON.stringify({ status }), accessToken, signal })
+  }
+
+  updateNotificationPreferences(preferences: NotificationPreference[], accessToken: string, signal?: AbortSignal): Promise<{ preferences: NotificationPreference[] }> {
+    return this.request('/v1/notification-preferences', { method: 'PUT', body: JSON.stringify({ preferences }), accessToken, signal })
+  }
+
+  createReportExport(input: { kind: ReportExportJob['kind']; format: ReportExportJob['format']; parameters?: Record<string, unknown> }, accessToken: string, signal?: AbortSignal): Promise<ReportExportJob> {
+    return this.request('/v1/report-exports', { method: 'POST', body: JSON.stringify(input), accessToken, signal })
   }
 
   revokeDevice(

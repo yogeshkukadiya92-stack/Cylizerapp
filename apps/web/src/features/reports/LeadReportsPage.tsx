@@ -35,6 +35,7 @@ interface LeadReportsPageProps {
   onApplyFilters: () => void
   onExport: () => void
   onFilterChange: (changes: Partial<LeadReportFilterDraft>) => void
+  showTitle?: boolean
 }
 
 const number = new Intl.NumberFormat('en-IN')
@@ -81,12 +82,12 @@ function TrendChart({ report }: { report: LeadReport }) {
   )
 }
 
-export function LeadReportsPage({ canExport, dataSource, employees, filters, isRefreshing, report, searchQuery, teams, onApplyFilters, onExport, onFilterChange }: LeadReportsPageProps) {
+export function LeadReportsPage({ canExport, dataSource, employees, filters, isRefreshing, report, searchQuery, teams, onApplyFilters, onExport, onFilterChange, showTitle = true }: LeadReportsPageProps) {
   const visibleOwners = report.owners.filter((owner) => owner.displayName.toLowerCase().includes(searchQuery.trim().toLowerCase()))
   const sourceMax = Math.max(1, ...report.sources.map((source) => source.percentageOfTotal))
   return (
     <div className="lead-reports-page">
-      <header className="lead-report-intro"><div className="page-title-row"><h1>Lead reports</h1><span aria-label={`Report data source: ${dataSource.status}`} className={`data-source data-source--${dataSource.status}`} role="status"><i />{isRefreshing ? 'Refreshing' : dataSource.status === 'live' ? 'Live data' : dataSource.status === 'demo' ? 'Demo data' : 'Loading'}</span></div><p>See conversion, follow-up and owner performance in one place.</p></header>
+      <header className="lead-report-intro"><div className="page-title-row">{showTitle ? <h1>Lead reports</h1> : null}<span aria-label={`Report data source: ${dataSource.status}`} className={`data-source data-source--${dataSource.status}`} role="status"><i />{isRefreshing ? 'Refreshing' : dataSource.status === 'live' ? 'Live data' : dataSource.status === 'demo' ? 'Demo data' : 'Loading'}</span></div>{showTitle ? <p>See conversion, follow-up and owner performance in one place.</p> : null}</header>
       {dataSource.error ? <div className="operation-notice operation-notice--warning" role="status">{dataSource.error}</div> : null}
       <section aria-label="Lead report filters" className="lead-report-filters">
         <div className="report-date-range"><CalendarDays size={17} /><label>From<input onChange={(event) => onFilterChange({ from: event.target.value })} type="date" value={filters.from} /></label><span>—</span><label>To<input onChange={(event) => onFilterChange({ to: event.target.value })} type="date" value={filters.to} /></label></div>

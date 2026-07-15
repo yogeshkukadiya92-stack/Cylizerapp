@@ -144,3 +144,98 @@ export interface ReportExportJob {
   expiresAt?: IsoDateTime;
   failureMessage?: string;
 }
+
+export type ReportCadence = "daily" | "weekly";
+export type NotificationChannel = "email" | "in_app";
+export type NotificationEvent =
+  | "missed_call"
+  | "overdue_follow_up"
+  | "device_offline"
+  | "import_completed"
+  | "export_ready";
+
+export interface SavedReportView {
+  id: EntityId;
+  organizationId: OrganizationId;
+  ownerUserId: EntityId;
+  name: string;
+  kind: ReportKind;
+  filters: Record<string, string | string[]>;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+}
+
+export interface ReportSchedule {
+  id: EntityId;
+  organizationId: OrganizationId;
+  savedViewId: EntityId;
+  name: string;
+  cadence: ReportCadence;
+  weekDay?: number;
+  localTime: string;
+  timeZone: string;
+  format: ReportFormat;
+  recipients: string[];
+  status: "active" | "paused";
+  nextRunAt: IsoDateTime;
+  lastRunAt?: IsoDateTime;
+}
+
+export interface NotificationPreference {
+  event: NotificationEvent;
+  email: boolean;
+  inApp: boolean;
+}
+
+export interface ReportAutomationSnapshot {
+  savedViews: SavedReportView[];
+  schedules: ReportSchedule[];
+  preferences: NotificationPreference[];
+  jobs: ReportExportJob[];
+}
+
+export interface CreateSavedReportViewInput {
+  name: string;
+  kind: ReportKind;
+  filters: Record<string, string | string[]>;
+}
+
+export interface CreateReportScheduleInput {
+  savedViewId: EntityId;
+  name: string;
+  cadence: ReportCadence;
+  weekDay?: number;
+  localTime: string;
+  format: ReportFormat;
+  recipients: string[];
+}
+
+export interface UpdateReportScheduleInput {
+  status: "active" | "paused";
+}
+
+export interface UpdateNotificationPreferencesInput {
+  preferences: NotificationPreference[];
+}
+
+export interface InAppNotification {
+  id: EntityId;
+  event: NotificationEvent;
+  title: string;
+  body: string;
+  actionUrl?: string;
+  createdAt: IsoDateTime;
+  readAt?: IsoDateTime;
+}
+
+export interface NotificationInbox {
+  items: InAppNotification[];
+  unreadCount: number;
+}
+
+export interface ReportArtifactReceipt {
+  jobId: EntityId;
+  objectKey: string;
+  downloadToken: string;
+  expiresAt: IsoDateTime;
+}

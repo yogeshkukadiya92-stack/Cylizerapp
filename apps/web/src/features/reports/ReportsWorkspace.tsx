@@ -7,6 +7,7 @@ import { AuthenticationRequiredError } from '../../auth/types'
 import type { AuthorizationFailure } from '../../auth/useAuth'
 import { demoLeadReport } from './data'
 import { LeadReportsPage, type LeadReportFilterDraft } from './LeadReportsPage'
+import { ReportAutomationPage } from './ReportAutomationPage'
 
 interface ReportsWorkspaceProps {
   authSession: AuthSession
@@ -78,6 +79,7 @@ function reportCsv(report: LeadReport): string {
 }
 
 export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotify, searchQuery }: ReportsWorkspaceProps) {
+  const [activeView, setActiveView] = useState<'performance' | 'automation'>('performance')
   const [client] = useState(() => new CalloraApiClient({ authMode: authSession.mode }))
   const [filters, setFilters] = useState<LeadReportFilterDraft>(initialFilters)
   const [appliedFilters, setAppliedFilters] = useState<LeadReportFilterDraft>(initialFilters)
@@ -168,7 +170,10 @@ export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotif
   }
 
   return (
-    <LeadReportsPage
+    <div className="reports-workspace">
+      <header className="reports-heading"><div><h1>{activeView === 'performance' ? 'Lead reports' : 'Report automation'}</h1><p>{activeView === 'performance' ? 'See conversion, follow-up and owner performance in one place.' : 'Save the view once. Callora keeps your team updated.'}</p></div></header>
+      <nav aria-label="Report views" className="reports-tabs"><button aria-current={activeView === 'performance' ? 'page' : undefined} onClick={() => setActiveView('performance')}>Performance</button><button aria-current={activeView === 'automation' ? 'page' : undefined} onClick={() => setActiveView('automation')}>Automation</button></nav>
+      {activeView === 'automation' ? <ReportAutomationPage authSession={authSession} client={client} onAuthenticationFailure={onAuthenticationFailure} onNotify={onNotify}/> : <LeadReportsPage
       canExport={permissions.includes('reports.export')}
       dataSource={dataSource}
       employees={employees}
@@ -179,7 +184,9 @@ export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotif
       onFilterChange={(changes) => setFilters((current) => ({ ...current, ...changes }))}
       report={report}
       searchQuery={searchQuery}
+      showTitle={false}
       teams={teams}
-    />
+      />}
+    </div>
   )
 }
