@@ -20,6 +20,12 @@
 - Authenticated claim-on-demand download grants: a ready report owner can mint a
   short-lived plaintext token in memory while persistence receives only its
   SHA-256 hash; redeemed jobs cannot mint replacement grants.
+- Artifact completion, in-app materialization, and email-delivery enqueue share
+  one tenant transaction. Both channels respect `export_ready` preferences and
+  de-duplicate by job; notification payloads contain no download secret.
+- Migration `0018_report_ready_delivery.sql` grants the worker read-only access
+  to notification preferences; runtime-role replay preserves the exact Phase 5
+  queue/delivery allowlist.
 - Cryptographically random download grants; only their SHA-256 digests enter persistence.
 
 ## Verification

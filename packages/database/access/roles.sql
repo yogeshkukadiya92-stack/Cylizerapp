@@ -386,6 +386,9 @@ to callora_auditor;
 -- organization context per short claim/delivery transaction.
 grant select on callora.organizations to callora_worker;
 grant select, insert, update, delete on callora.outbox_events to callora_worker;
+grant select on callora.notification_preferences to callora_worker;
+grant select, update on callora.report_export_jobs, callora.report_schedules to callora_worker;
+grant select, insert, update on callora.notification_deliveries, callora.in_app_notifications to callora_worker;
 
 grant execute on function callora.current_organization_id()
   to callora_api, callora_ingest, callora_auditor, callora_worker,

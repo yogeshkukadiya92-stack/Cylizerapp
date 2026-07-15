@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import type { ClaimedReportJob, ReportRow, ReportScheduleEnqueuer, ReportWorkerRepository } from "../report-worker.js";
 import type { PgClientLike, PgPoolLike } from "./types.js";
@@ -42,9 +43,25 @@ export class PostgresReportWorkerRepository implements ReportWorkerRepository, R
         download_token_hash=$5::bytea, download_expires_at=$6::timestamptz, completed_at=$7::timestamptz,
         lease_owner=null, lease_expires_at=null, failure_message=null
         where organization_id=$1::uuid and id=$2::uuid and status='processing' and lease_owner=$3
-          and lease_expires_at > $7::timestamptz returning id`,
+          and lease_expires_at > $7::timestamptz returning id,requested_by_user_id,report_kind`,
       [input.job.organizationId, input.job.id, this.workerId, input.objectKey, Buffer.from(input.tokenHash), input.expiresAt, input.completedAt]);
-      return result.rows.length === 1;
+      const completed=result.rows[0]; if(!completed)return false;
+      const payload=JSON.stringify({jobId:input.job.id,reportKind:String(completed.report_kind),actionUrl:"/reports/automation"});
+      const inAppDeliveryId=randomUUID();
+      const inApp=await client.query(`insert into callora.notification_deliveries (organization_id,id,user_id,event_key,channel,deduplication_key,payload,status,delivered_at,created_at,updated_at)
+        select $1::uuid,$3::uuid,$2::uuid,'export_ready','in_app',$4,$5::jsonb,'delivered',$6::timestamptz,$6::timestamptz,$6::timestamptz
+        where coalesce((select preference.in_app_enabled from callora.notification_preferences preference where preference.organization_id=$1::uuid and preference.user_id=$2::uuid and preference.event_key='export_ready'),true)
+        on conflict (organization_id,user_id,channel,deduplication_key) do nothing returning id`,
+      [input.job.organizationId,String(completed.requested_by_user_id),inAppDeliveryId,`export-ready:${input.job.id}`,payload,input.completedAt]);
+      if(inApp.rows.length===1)await client.query(`insert into callora.in_app_notifications (organization_id,id,delivery_id,user_id,event_key,title,body,action_url,created_at)
+        values ($1::uuid,$2::uuid,$3::uuid,$4::uuid,'export_ready','Report ready','Your Callora report is ready to download.','/reports/automation',$5::timestamptz)`,
+      [input.job.organizationId,randomUUID(),inAppDeliveryId,String(completed.requested_by_user_id),input.completedAt]);
+      await client.query(`insert into callora.notification_deliveries (organization_id,id,user_id,event_key,channel,deduplication_key,payload,status,available_at,created_at,updated_at)
+        select $1::uuid,$3::uuid,$2::uuid,'export_ready','email',$4,$5::jsonb,'queued',$6::timestamptz,$6::timestamptz,$6::timestamptz
+        where coalesce((select preference.email_enabled from callora.notification_preferences preference where preference.organization_id=$1::uuid and preference.user_id=$2::uuid and preference.event_key='export_ready'),true)
+        on conflict (organization_id,user_id,channel,deduplication_key) do nothing`,
+      [input.job.organizationId,String(completed.requested_by_user_id),randomUUID(),`export-ready:${input.job.id}`,payload,input.completedAt]);
+      return true;
     });
   }
 

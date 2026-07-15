@@ -28,8 +28,17 @@ describe("PostgresReportWorkerRepository", () => {
     fixture.client.query.mockImplementation(async (sql: string) => ({ rows: sql.includes("returning id") ? [{ id: "job" }] : [], rowCount: 0, command: "", oid: 0, fields: [] }));
     const repository = new PostgresReportWorkerRepository(fixture.pool, "worker-a", async () => []);
     await expect(repository.complete({ job: { organizationId: "org", id: "job", kind: "call_summary", format: "csv", parameters: {} }, objectKey: "org/job.csv", tokenHash: new Uint8Array(32), expiresAt: "2026-07-17T00:00:00.000Z", completedAt: "2026-07-15T00:00:00.000Z" })).resolves.toBe(true);
-    expect(fixture.client.query.mock.calls.map((call) => call[0])).toEqual(["begin", "select set_config('app.current_organization_id', $1, true)", expect.stringContaining("lease_owner=$3"), "commit"]);
+    expect(fixture.client.query.mock.calls.map((call) => call[0])).toEqual(["begin", "select set_config('app.current_organization_id', $1, true)", expect.stringContaining("lease_owner=$3"), expect.stringContaining("notification_deliveries"), expect.stringContaining("in_app_notifications"), expect.stringContaining("notification_deliveries"), "commit"]);
     expect(fixture.client.release).toHaveBeenCalledOnce();
+  });
+
+  it("materializes token-free in-app and email export-ready delivery state", async () => {
+    const fixture = poolWithClient();
+    fixture.client.query.mockImplementation(async (sql: string) => ({ rows: sql.includes("returning id") ? [{ id: "job", requested_by_user_id: "user", report_kind: "call_summary" }] : [], rowCount: 0, command: "", oid: 0, fields: [] }));
+    const repository = new PostgresReportWorkerRepository(fixture.pool, "worker-a", async () => []);
+    await repository.complete({ job: { organizationId: "org", id: "job", kind: "call_summary", format: "csv", parameters: {} }, objectKey: "org/job.csv", tokenHash: new Uint8Array(32), expiresAt: "2026-07-17T00:00:00.000Z", completedAt: "2026-07-15T00:00:00.000Z" });
+    const sql=fixture.client.query.mock.calls.map((call)=>String(call[0])).join("\n");
+    expect(sql).toContain("'export_ready','in_app'"); expect(sql).toContain("'export_ready','email'"); expect(sql).toContain("/reports/automation"); expect(sql).not.toContain("downloadToken");
   });
 
   it("requeues failures with bounded backoff and clears the lease", async () => {
