@@ -18,6 +18,7 @@
     "migrate": "node scripts/run-sql.mjs migrate",
     "seed": "node scripts/run-sql.mjs seed/dev.sql",
     "bootstrap:production": "node scripts/run-sql.mjs seed/production.sql",
+    "roles:bootstrap": "node scripts/run-sql.mjs access/bootstrap-roles.sql",
     "access:apply": "node scripts/run-sql.mjs access/roles.sql",
     "pii:finalize": "node scripts/run-sql.mjs operations/finalize-call-pii.sql",
     "verify:live": "node scripts/run-sql.mjs tests/live-schema.sql",
