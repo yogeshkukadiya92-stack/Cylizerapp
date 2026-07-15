@@ -34,6 +34,10 @@
   structured tick output. The Resend adapter uses the official `POST /emails`
   API with bearer auth, timeouts, and delivery-ID idempotency keys.
 - Cryptographically random download grants; only their SHA-256 digests enter persistence.
+- Dependency-free, bounded XLSX and paginated PDF renderers with a 10,000-row
+  ceiling and 50 MiB output limit; the worker now handles all advertised formats.
+- S3-compatible SigV4 artifact reader/writer with client-side AES-256-GCM,
+  object-key validation, authenticated encryption, and bounded transfers.
 
 ## Verification
 
@@ -45,7 +49,5 @@
 
 - Production-volume reconciliation evidence proving loader aggregates remain
   identical to the interactive API metric definitions.
-- XLSX and PDF renderers with bounded memory and output-size limits.
-- S3-compatible encrypted object storage reader/writer implementation.
 - Email provider delivery, verified bounce/complaint/unsubscribe webhooks, and in-app delivery materialization.
 - Live PostgreSQL concurrency/DST/provider-failure evidence.

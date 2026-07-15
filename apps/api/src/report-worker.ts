@@ -2,6 +2,7 @@ import { mkdir, open, rename, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { createDownloadToken, hashDownloadToken, REPORT_DOWNLOAD_TTL_SECONDS } from "./report-workflows.js";
+import { renderPdf, renderXlsx } from "./report-renderers.js";
 
 export type ReportCell = string | number | boolean | null | undefined;
 export type ReportRow = Record<string, ReportCell>;
@@ -72,9 +73,10 @@ export async function processNextReportJob(options: { repository: ReportWorkerRe
   const job = await options.repository.claim(options.workerId, options.leaseSeconds ?? 300);
   if (!job) return { status: "idle" };
   try {
-    if (job.format !== "csv") throw new Error(`${job.format.toUpperCase()} rendering is not enabled`);
-    const objectKey = `${job.organizationId}/${job.id}.csv`;
-    await options.store.put(objectKey, renderCsv(await options.repository.rows(job)));
+    const rows = await options.repository.rows(job);
+    const body = job.format === "csv" ? renderCsv(rows) : job.format === "xlsx" ? renderXlsx(rows) : renderPdf(rows);
+    const objectKey = `${job.organizationId}/${job.id}.${job.format}`;
+    await options.store.put(objectKey, body);
     const downloadToken = createDownloadToken();
     const expiresAt = new Date(now.getTime() + REPORT_DOWNLOAD_TTL_SECONDS * 1000).toISOString();
     if (!await options.repository.complete({ job, objectKey, tokenHash: hashDownloadToken(downloadToken), expiresAt, completedAt: now.toISOString() })) throw new Error("Report job lease was lost before completion");

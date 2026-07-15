@@ -61,6 +61,7 @@ import {
 import { buildDashboardOverview, type DashboardPreset, type DashboardQuery } from "./analytics.js";
 import { createDownloadToken, hashDownloadToken, REPORT_DOWNLOAD_TTL_SECONDS } from "./report-workflows.js";
 import type { ReportArtifactReader } from "./report-worker.js";
+import type { RecordingService } from "./recording-service.js";
 import {
   OidcBearerVerificationError,
   type OidcBearerVerifier,
@@ -116,6 +117,7 @@ export interface BuildAppOptions {
   oidcVerifier?: OidcBearerVerifier;
   pairingLimiter?: SharedAttemptLimiter;
   reportArtifactReader?: ReportArtifactReader;
+  recordingService?: RecordingService;
   logger?: boolean;
 }
 
@@ -1409,6 +1411,23 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     }
     return success(request, result);
   });
+
+  app.post("/v1/recordings/uploads", { preHandler: protect("recordings.manage") }, async (request, reply) => {
+    if (!options.recordingService) throw new ApiDomainError({ statusCode: 503, code: "INTERNAL_ERROR", message: "Recording uploads are unavailable" });
+    const actor = currentActor(request); const body = bodyRecord(request);
+    const mimeType = requiredString(body.mimeType, "mimeType", 80); if (!["audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg"].includes(mimeType)) throw badRequest("Unsupported recording MIME type", "mimeType");
+    const source = requiredString(body.source, "source", 40); if (!["device_folder", "voip_provider", "manual_upload"].includes(source)) throw badRequest("Unsupported recording source", "source");
+    const sizeBytes = Number(body.sizeBytes); if (!Number.isSafeInteger(sizeBytes)) throw badRequest("sizeBytes must be an integer", "sizeBytes");
+    try { const session = options.recordingService.begin(actor.organization.id, { callLogId: requiredString(body.callLogId, "callLogId", 100), fileName: requiredString(body.fileName, "fileName", 180), mimeType: mimeType as "audio/mpeg", sizeBytes, checksumSha256: requiredString(body.checksumSha256, "checksumSha256", 64), source: source as "manual_upload" }); reply.code(session.deduplicated ? 200 : 201); return success(request, session); } catch (error) { throw badRequest(error instanceof Error ? error.message : "Recording upload rejected"); }
+  });
+  app.put("/v1/recordings/uploads/:uploadId/parts/:partNumber", { preHandler: protect("recordings.manage") }, async (request, reply) => {
+    if (!options.recordingService) throw new ApiDomainError({ statusCode: 503, code: "INTERNAL_ERROR", message: "Recording uploads are unavailable" }); const actor = currentActor(request); const params = isRecord(request.params) ? request.params : {}; const body = bodyRecord(request); let bytes: Buffer; try { bytes = Buffer.from(requiredString(body.base64, "base64", 8_000_000), "base64"); } catch { throw badRequest("base64 is invalid", "base64"); }
+    try { options.recordingService.uploadPart(actor.organization.id, requiredString(params.uploadId, "uploadId", 100), Number(params.partNumber), bytes, requiredString(body.checksumSha256, "checksumSha256", 64)); reply.code(204); return reply.send(); } catch (error) { throw badRequest(error instanceof Error ? error.message : "Recording part rejected"); }
+  });
+  app.post("/v1/recordings/uploads/:uploadId/complete", { preHandler: protect("recordings.manage") }, async (request) => { if (!options.recordingService) throw new ApiDomainError({ statusCode: 503, code: "INTERNAL_ERROR", message: "Recording uploads are unavailable" }); const actor = currentActor(request); const params = isRecord(request.params) ? request.params : {}; try { return success(request, await options.recordingService.complete(actor.organization.id, requiredString(params.uploadId, "uploadId", 100))); } catch (error) { throw badRequest(error instanceof Error ? error.message : "Recording completion rejected"); } });
+  app.post("/v1/recordings/:recordingId/playback-grant", { preHandler: protect("recordings.listen") }, async (request) => { if (!options.recordingService) throw notFound("Recording is unavailable"); const actor = currentActor(request); const params = isRecord(request.params) ? request.params : {}; try { return success(request, options.recordingService.issuePlaybackGrant(actor.organization.id, requiredString(params.recordingId, "recordingId", 100))); } catch { throw notFound("Recording is unavailable"); } });
+  app.post("/v1/recordings/:recordingId/playback", { preHandler: protect("recordings.listen") }, async (request, reply) => { if (!options.recordingService) throw notFound("Recording is unavailable"); const actor = currentActor(request); const params = isRecord(request.params) ? request.params : {}; const body = bodyRecord(request); try { const media = await options.recordingService.playback(actor.organization.id, requiredString(params.recordingId, "recordingId", 100), requiredString(body.token, "token", 100), body.start === undefined ? undefined : { start: Number(body.start), ...(body.end === undefined ? {} : { end: Number(body.end) }) }); reply.header("content-type", media.mimeType); reply.header("accept-ranges", "bytes"); reply.header("content-range", `bytes ${media.start}-${media.end}/${media.totalBytes}`); reply.header("cache-control", "private, no-store"); reply.code(media.start === 0 && media.end === media.totalBytes - 1 ? 200 : 206); return reply.send(Buffer.from(media.body)); } catch { throw notFound("Playback grant is unavailable or expired"); } });
+  app.delete("/v1/recordings/:recordingId", { preHandler: protect("recordings.manage") }, async (request, reply) => { if (!options.recordingService) throw notFound("Recording is unavailable"); const actor = currentActor(request); const params = isRecord(request.params) ? request.params : {}; if (!await options.recordingService.delete(actor.organization.id, requiredString(params.recordingId, "recordingId", 100))) throw notFound("Recording is unavailable"); reply.code(204); return reply.send(); });
 
   app.get("/v1/lead-reports", { preHandler: protect("reports.read") }, async (request) => {
     const actor = currentActor(request);

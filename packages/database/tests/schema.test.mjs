@@ -31,6 +31,7 @@ test("migrations use a contiguous, deterministic order", () => {
     "0017_report_delivery_workflows.sql",
     "0018_report_ready_delivery.sql",
     "0019_notification_delivery_claims.sql",
+    "0020_recordings_and_transcripts.sql",
   ]);
 });
 

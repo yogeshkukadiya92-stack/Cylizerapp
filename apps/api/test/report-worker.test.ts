@@ -24,10 +24,10 @@ describe("report worker", () => {
     await expect(new FileSystemReportArtifactReader(root, 2).get("org/job.csv")).rejects.toThrow("download size limit");
     await expect(new FileSystemReportArtifactReader(root).get("../secret.csv")).rejects.toThrow("Invalid artifact object key");
   });
-  it("fails unsupported formats without issuing an artifact token", async () => {
-    const fail = vi.fn(); const repository: ReportWorkerRepository = { claim: vi.fn().mockResolvedValue({ organizationId: "org-one", id: "job-pdf", kind: "call_summary", format: "pdf", parameters: {} }), rows: vi.fn(), complete: vi.fn(), fail };
-    expect(await processNextReportJob({ repository, store: { put: vi.fn() }, workerId: "worker-1" })).toEqual({ status: "failed", jobId: "job-pdf" });
-    expect(fail).toHaveBeenCalledWith(expect.anything(), "PDF rendering is not enabled", expect.any(String));
+  it("renders PDF jobs and completes their artifact", async () => {
+    const put = vi.fn(); const complete = vi.fn().mockResolvedValue(true); const repository: ReportWorkerRepository = { claim: vi.fn().mockResolvedValue({ organizationId: "org-one", id: "job-pdf", kind: "call_summary", format: "pdf", parameters: {} }), rows: vi.fn().mockResolvedValue([{ calls: 4 }]), complete, fail: vi.fn() };
+    expect((await processNextReportJob({ repository, store: { put }, workerId: "worker-1" })).status).toBe("ready");
+    expect(put.mock.calls[0]![0]).toBe("org-one/job-pdf.pdf"); expect(Buffer.from(put.mock.calls[0]![1]).subarray(0, 4).toString()).toBe("%PDF"); expect(complete).toHaveBeenCalledOnce();
   });
   it("stops an idle polling loop promptly when aborted", async () => {
     const controller = new AbortController();
