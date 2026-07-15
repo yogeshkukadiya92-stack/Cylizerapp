@@ -128,8 +128,10 @@ function readDatabaseConfig(
   if (!["disable", "require", "verify-full"].includes(sslMode)) {
     throw new Error("DATABASE_SSL_MODE must be disable, require, or verify-full");
   }
-  if (environment === "production" && sslMode !== "verify-full") {
-    throw new Error("DATABASE_SSL_MODE must be verify-full in production");
+  const privateRailwayNoTls = env.DATABASE_ALLOW_RAILWAY_PRIVATE_NETWORK_NO_TLS === "true" &&
+    parsed.hostname.toLowerCase().endsWith(".railway.internal") && sslMode === "disable";
+  if (environment === "production" && sslMode !== "verify-full" && !privateRailwayNoTls) {
+    throw new Error("DATABASE_SSL_MODE must be verify-full in production unless the explicit Railway private-network exception is enabled");
   }
 
   return {

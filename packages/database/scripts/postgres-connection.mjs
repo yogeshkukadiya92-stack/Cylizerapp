@@ -49,12 +49,14 @@ export function preparePostgresCliConnection(value, inheritedEnvironment = proce
       "DATABASE_SSL_MODE must be explicitly disable or verify-full for database CLI commands.",
     );
   }
-  if (sslMode === "disable" && !isLoopbackHost(parsed.hostname)) {
+  const privateRailwayNoTls = inheritedEnvironment.DATABASE_ALLOW_RAILWAY_PRIVATE_NETWORK_NO_TLS === "true" &&
+    parsed.hostname.toLowerCase().endsWith(".railway.internal");
+  if (sslMode === "disable" && !isLoopbackHost(parsed.hostname) && !privateRailwayNoTls) {
     throw new PostgresConnectionConfigurationError(
       "DATABASE_SSL_MODE=disable is allowed only for an isolated loopback database.",
     );
   }
-  if (inheritedEnvironment.NODE_ENV === "production" && sslMode !== "verify-full") {
+  if (inheritedEnvironment.NODE_ENV === "production" && sslMode !== "verify-full" && !privateRailwayNoTls) {
     throw new PostgresConnectionConfigurationError(
       "Production database CLI commands require DATABASE_SSL_MODE=verify-full.",
     );
