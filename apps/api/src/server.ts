@@ -44,7 +44,11 @@ try {
   const config = loadConfig();
   if (config.environment === "production") {
     if (!config.database) throw new Error("Production database configuration is missing");
-    const ssl = postgresSslOptions(config.database.sslMode, { requireVerified: true });
+    // loadConfig only permits `disable` in production for the explicit,
+    // hostname-scoped Railway private-network exception.
+    const ssl = postgresSslOptions(config.database.sslMode, {
+      requireVerified: config.database.sslMode !== "disable",
+    });
     const pool = createPostgresPool({
       connectionString: config.database.connectionString,
       max: config.database.maxConnections,
