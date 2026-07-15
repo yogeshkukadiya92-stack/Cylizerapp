@@ -29,6 +29,10 @@
 - Migration `0019_notification_delivery_claims.sql` and the email worker add
   `SKIP LOCKED` concurrent claims, provider-neutral sending, sanitized errors,
   bounded exponential retries, terminal suppression, and provider-message audit IDs.
+- A deployable `start:report-worker` runtime now composes separate queue/read
+  pools, scheduler, render/storage, email queue, graceful shutdown, and sanitized
+  structured tick output. The Resend adapter uses the official `POST /emails`
+  API with bearer auth, timeouts, and delivery-ID idempotency keys.
 - Cryptographically random download grants; only their SHA-256 digests enter persistence.
 
 ## Verification

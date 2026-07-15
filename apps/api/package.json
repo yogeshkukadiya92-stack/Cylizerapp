@@ -15,6 +15,7 @@
     "dev": "NODE_ENV=development DEV_AUTH_ENABLED=true tsx watch src/server.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
+    "start:report-worker": "node dist/report-worker-server.js",
     "pii:backfill": "tsx src/tools/call-pii-backfill.ts backfill",
     "pii:rotate": "tsx src/tools/call-pii-backfill.ts rotate",
     "pii:verify": "tsx src/tools/call-pii-backfill.ts verify",

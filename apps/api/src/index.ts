@@ -72,3 +72,4 @@ export {
 } from "./report-worker.js";
 export { loadReportWorkerConfig, type ReportWorkerConfig } from "./report-worker-config.js";
 export { processNextEmailDelivery, type ClaimedEmailDelivery, type EmailDeliveryQueue, type EmailProvider } from "./notification-worker.js";
+export { ResendEmailProvider } from "./resend-email-provider.js";

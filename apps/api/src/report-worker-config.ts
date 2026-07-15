@@ -10,6 +10,9 @@ export interface ReportWorkerConfig {
   leaseSeconds: number;
   scheduleLimit: number;
   jobLimit: number;
+  resendApiKey: string;
+  emailFrom: string;
+  emailTimeoutMs: number;
 }
 
 function required(env: Readonly<Record<string, string | undefined>>, name: string): string {
@@ -35,5 +38,8 @@ export function loadReportWorkerConfig(env: Readonly<Record<string, string | und
     leaseSeconds: integer(env, "REPORT_WORKER_LEASE_SECONDS", 300, 30, 1_800),
     scheduleLimit: integer(env, "REPORT_WORKER_SCHEDULE_LIMIT", 50, 1, 100),
     jobLimit: integer(env, "REPORT_WORKER_JOB_LIMIT", 25, 1, 100),
+    resendApiKey: required(env,"RESEND_API_KEY"),
+    emailFrom: required(env,"REPORT_EMAIL_FROM"),
+    emailTimeoutMs: integer(env,"REPORT_EMAIL_TIMEOUT_MS",10_000,1_000,30_000),
   };
 }

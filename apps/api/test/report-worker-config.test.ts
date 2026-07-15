@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadReportWorkerConfig } from "../src/report-worker-config.js";
 
-const valid = { NODE_ENV: "production", REPORT_WORKER_ID: "reports:worker-1", REPORT_QUEUE_DATABASE_URL: "postgresql://queue:secret@db.example.com/callora", REPORT_DATA_DATABASE_URL: "postgresql://reader:secret@db.example.com/callora", REPORT_DATABASE_SSL_MODE: "verify-full", REPORT_ARTIFACT_ROOT: "/srv/callora/reports" };
+const valid = { NODE_ENV: "production", REPORT_WORKER_ID: "reports:worker-1", REPORT_QUEUE_DATABASE_URL: "postgresql://queue:secret@db.example.com/callora", REPORT_DATA_DATABASE_URL: "postgresql://reader:secret@db.example.com/callora", REPORT_DATABASE_SSL_MODE: "verify-full", REPORT_ARTIFACT_ROOT: "/srv/callora/reports", RESEND_API_KEY:"re_1234567890abcdef",REPORT_EMAIL_FROM:"Callora <reports@example.com>" };
 describe("report worker config", () => {
   it("loads bounded production settings with separate database identities", () => {
     expect(loadReportWorkerConfig(valid)).toMatchObject({ workerId: "reports:worker-1", databaseSslMode: "verify-full", pollIntervalMs: 2000, leaseSeconds: 300, scheduleLimit: 50, jobLimit: 25 });
