@@ -94,11 +94,22 @@ describe('Callora dashboard', () => {
   it('opens a planned module and returns to the dashboard', () => {
     render(<App />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Leads' }))
-    expect(screen.getByRole('heading', { name: 'Leads' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Reports' }))
+    expect(screen.getByRole('heading', { name: 'Reports' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Return to dashboard' }))
 
     expect(screen.getByRole('heading', { name: 'Team calling overview' })).toBeInTheDocument()
+  })
+
+  it('mounts the real lead pipeline instead of a module preview', async () => {
+    render(<App />)
+
+    await screen.findByRole('status', { name: 'Data source: Demo data · API unavailable' })
+    fireEvent.click(screen.getByRole('button', { name: 'Leads' }))
+
+    expect(await screen.findByRole('heading', { name: 'Lead pipeline' })).toBeInTheDocument()
+    expect(await screen.findByRole('complementary', { name: 'Ramesh Traders' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Return to dashboard' })).not.toBeInTheDocument()
   })
 
   it('loads live overview and employees in parallel, then sends filter and employee mutations to the API', async () => {

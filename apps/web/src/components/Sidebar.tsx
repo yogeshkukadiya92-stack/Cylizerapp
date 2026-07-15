@@ -10,8 +10,9 @@ import {
   Waves,
   X,
 } from 'lucide-react'
+import type { AppModule } from '../navigation'
 
-const navItems = [
+const navItems: Array<{ label: AppModule; icon: typeof Gauge }> = [
   { label: 'Dashboard', icon: Gauge },
   { label: 'Team', icon: UsersRound },
   { label: 'Call logs', icon: Phone },
@@ -23,10 +24,10 @@ const navItems = [
 ]
 
 interface SidebarProps {
-  activeModule: string
+  activeModule: AppModule
   isOpen: boolean
   onClose: () => void
-  onModuleChange: (module: string) => void
+  onModuleChange: (module: AppModule) => void
 }
 
 export function Sidebar({ activeModule, isOpen, onClose, onModuleChange }: SidebarProps) {

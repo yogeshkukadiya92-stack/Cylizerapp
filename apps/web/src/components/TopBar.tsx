@@ -1,4 +1,4 @@
-import { Bell, CalendarDays, ChevronDown, Menu, Search } from 'lucide-react'
+import { Bell, CalendarDays, ChevronDown, Menu, Phone, Search } from 'lucide-react'
 
 interface TopBarProps {
   displayName: string
@@ -14,6 +14,7 @@ export function TopBar({ displayName, onMenuClick, onSignOut, searchQuery, onSea
   return (
     <header className="topbar">
       <div className="topbar__greeting">
+        <span className="topbar-mobile-brand"><Phone size={25} strokeWidth={2.2} />Callora</span>
         <button aria-label="Open navigation" className="icon-button menu-button" onClick={onMenuClick} type="button">
           <Menu size={22} />
         </button>

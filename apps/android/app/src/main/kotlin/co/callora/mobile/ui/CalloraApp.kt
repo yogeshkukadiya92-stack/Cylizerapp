@@ -7,6 +7,8 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +25,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -32,10 +35,13 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -59,6 +65,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
@@ -66,6 +73,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import co.callora.mobile.calls.VariantCapabilities
 import co.callora.mobile.BuildConfig
 import co.callora.mobile.core.onboarding.OnboardingStage
+import co.callora.mobile.data.api.AssignedLead
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @Composable
 fun CalloraApp(viewModel: CalloraViewModel) {
@@ -93,7 +104,7 @@ fun CalloraApp(viewModel: CalloraViewModel) {
     Scaffold(
         modifier = Modifier.testTag("callora_root"),
         contentWindowInsets = WindowInsets.safeDrawing,
-        topBar = { CalloraHeader(state.onboarding.stage) },
+        topBar = { CalloraHeader(state.onboarding.stage, state.section) },
         bottomBar = {
             if (state.onboarding.stage == OnboardingStage.READY) {
                 ReadyNavigation(state.section, viewModel::selectSection)
@@ -150,6 +161,12 @@ fun CalloraApp(viewModel: CalloraViewModel) {
                 modifier = Modifier.padding(insets),
                 state = state,
                 onSync = viewModel::syncNow,
+                onRefreshLeads = viewModel::refreshAssignedLeads,
+                onDialLead = { phoneNumber ->
+                    context.startActivity(
+                        Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(phoneNumber)}")),
+                    )
+                },
                 onSaveApiUrl = viewModel::saveApiBaseUrl,
                 onRotate = viewModel::rotateSession,
                 onRevoke = viewModel::revokeAndWithdrawConsent,
@@ -165,7 +182,7 @@ fun CalloraApp(viewModel: CalloraViewModel) {
 }
 
 @Composable
-private fun CalloraHeader(stage: OnboardingStage) {
+private fun CalloraHeader(stage: OnboardingStage, section: ReadySection) {
     Surface(tonalElevation = 2.dp) {
         Row(
             modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 20.dp, vertical = 12.dp),
@@ -188,7 +205,12 @@ private fun CalloraHeader(stage: OnboardingStage) {
                         OnboardingStage.ACTIVATING -> "Activating"
                         OnboardingStage.RECOVERING -> "Secure recovery"
                         OnboardingStage.PERMISSION -> "Permission"
-                        OnboardingStage.READY -> "Collector status"
+                        OnboardingStage.READY -> when (section) {
+                            ReadySection.LEADS -> "Assigned leads"
+                            ReadySection.STATUS -> "Collector status"
+                            ReadySection.DIAGNOSTICS -> "Diagnostics"
+                            ReadySection.SETTINGS -> "Settings"
+                        }
                         OnboardingStage.REVOKED -> "Collection stopped"
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -405,16 +427,237 @@ private fun ReadyScreen(
     modifier: Modifier,
     state: CalloraUiState,
     onSync: () -> Unit,
+    onRefreshLeads: () -> Unit,
+    onDialLead: (String) -> Unit,
     onSaveApiUrl: (String) -> Unit,
     onRotate: () -> Unit,
     onRevoke: () -> Unit,
 ) {
     when (state.section) {
+        ReadySection.LEADS -> LeadsScreen(modifier, state, onRefreshLeads, onDialLead)
         ReadySection.STATUS -> StatusScreen(modifier, state, onSync)
         ReadySection.DIAGNOSTICS -> DiagnosticsScreen(modifier, state)
         ReadySection.SETTINGS -> SettingsScreen(modifier, state, onSaveApiUrl, onRotate, onRevoke)
     }
 }
+
+private enum class LeadQueue(val label: String) {
+    ALL("All"),
+    NOT_CONTACTED("Not contacted"),
+    OVERDUE("Overdue"),
+    UNRETURNED("Unreturned"),
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun LeadsScreen(
+    modifier: Modifier,
+    state: CalloraUiState,
+    onRefresh: () -> Unit,
+    onDial: (String) -> Unit,
+) {
+    var search by rememberSaveable { mutableStateOf("") }
+    var queue by rememberSaveable { mutableStateOf(LeadQueue.ALL) }
+    var selectedLead by remember { mutableStateOf<AssignedLead?>(null) }
+    val normalizedSearch = search.trim().lowercase()
+    val leads = state.assignedLeads.filter { lead ->
+        val matchesQueue = when (queue) {
+            LeadQueue.ALL -> true
+            LeadQueue.NOT_CONTACTED -> lead.lastContactedAt == null
+            LeadQueue.OVERDUE -> lead.overdueFollowUpCount > 0
+            LeadQueue.UNRETURNED -> lead.unreturnedMissedCallCount > 0
+        }
+        matchesQueue && (normalizedSearch.isBlank() || listOfNotNull(
+            lead.displayName,
+            lead.companyName,
+            lead.phoneNumber,
+            lead.email,
+        ).any { it.lowercase().contains(normalizedSearch) })
+    }
+    ScreenList(modifier.testTag("assigned_leads_list")) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Heading("Assigned leads")
+                    Text("Call customers and keep due work visible.", style = MaterialTheme.typography.bodyMedium)
+                }
+                OutlinedButton(
+                    onClick = onRefresh,
+                    enabled = !state.leadsLoading,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) { Text(if (state.leadsLoading) "Loading…" else "Refresh") }
+            }
+        }
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val summary = state.leadSummary
+                listOf(
+                    LeadQueue.ALL to summary.total,
+                    LeadQueue.NOT_CONTACTED to summary.notContacted,
+                    LeadQueue.OVERDUE to summary.overdue,
+                    LeadQueue.UNRETURNED to summary.unreturnedCalls,
+                ).forEach { (candidate, count) ->
+                    FilterChip(
+                        selected = queue == candidate,
+                        onClick = { queue = candidate },
+                        label = { Text("${candidate.label} $count") },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    )
+                }
+            }
+        }
+        item {
+            OutlinedTextField(
+                value = search,
+                onValueChange = { search = it.take(160) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Search assigned leads") },
+                supportingText = { Text("Name, company, phone, or email") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            )
+        }
+        if (state.leadsLoading && state.assignedLeads.isEmpty()) {
+            item {
+                ElevatedCard {
+                    Row(
+                        Modifier.fillMaxWidth().padding(20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                        Text("Loading assigned leads…")
+                    }
+                }
+            }
+        } else if (state.leadsErrorCode != null && state.assignedLeads.isEmpty()) {
+            item {
+                StatusBanner(
+                    "Assigned leads unavailable",
+                    friendlyError(state.leadsErrorCode),
+                )
+            }
+            item { PrimaryAction("Try again", onRefresh) }
+        } else if (leads.isEmpty()) {
+            item {
+                StatusBanner(
+                    if (state.assignedLeads.isEmpty()) "No leads assigned" else "No leads match",
+                    if (state.assignedLeads.isEmpty()) "New assigned work will appear here after refresh."
+                    else "Change the queue or search text to see more leads.",
+                )
+            }
+        } else {
+            items(leads, key = AssignedLead::id) { lead ->
+                LeadCard(lead, onOpen = { selectedLead = lead }, onDial = { onDial(lead.phoneNumber) })
+            }
+        }
+        state.leadsGeneratedAt?.let { generatedAt ->
+            item {
+                Text(
+                    "Updated ${formatLeadDate(generatedAt)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+    selectedLead?.let { lead ->
+        ModalBottomSheet(onDismissRequest = { selectedLead = null }) {
+            Column(
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Text(lead.displayName, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                StatusPill(lead.statusName, lead.statusColor)
+                InfoRow("Phone", lead.phoneNumber)
+                lead.email?.let { InfoRow("Email", it) }
+                InfoRow("Source", lead.source.replace('_', ' ').replaceFirstChar(Char::uppercase))
+                InfoRow("Last contacted", lead.lastContactedAt?.let(::formatLeadDate) ?: "Not contacted")
+                InfoRow("Next follow-up", lead.nextFollowUpAt?.let(::formatLeadDate) ?: "Not scheduled")
+                lead.nextFollowUpTitle?.let { InfoRow("Next action", it) }
+                Button(
+                    onClick = { onDial(lead.phoneNumber) },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) { Text("Call ${lead.firstName}") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LeadCard(lead: AssignedLead, onOpen: () -> Unit, onDial: () -> Unit) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        lead.displayName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(lead.phoneNumber, style = MaterialTheme.typography.bodyMedium)
+                }
+                StatusPill(lead.statusName, lead.statusColor)
+            }
+            val followUp = lead.nextFollowUpAt
+            if (followUp != null) {
+                Text(
+                    "${if (lead.overdueFollowUpCount > 0) "Overdue" else "Due"}: ${formatLeadDate(followUp)}" +
+                        (lead.nextFollowUpTitle?.let { " · $it" } ?: ""),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (lead.overdueFollowUpCount > 0) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Text("No follow-up scheduled", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onOpen, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                    Text("View")
+                }
+                Button(onClick = onDial, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                    Text("Call")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusPill(label: String, color: String) {
+    val tint = runCatching { androidx.compose.ui.graphics.Color(android.graphics.Color.parseColor(color)) }
+        .getOrElse { MaterialTheme.colorScheme.primary }
+    Surface(color = tint.copy(alpha = 0.14f), shape = RoundedCornerShape(999.dp)) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+private fun formatLeadDate(value: String): String = runCatching {
+    DateTimeFormatter.ofPattern("dd MMM, h:mm a")
+        .withZone(ZoneId.systemDefault())
+        .format(Instant.parse(value))
+}.getOrDefault(value)
 
 @Composable
 private fun StatusScreen(modifier: Modifier, state: CalloraUiState, onSync: () -> Unit) {
@@ -579,8 +822,9 @@ private fun ReadyNavigation(selected: ReadySection, onSelected: (ReadySection) -
     NavigationBar {
         ReadySection.entries.forEach { section ->
             val label = when (section) {
+                ReadySection.LEADS -> "Leads"
                 ReadySection.STATUS -> "Status"
-                ReadySection.DIAGNOSTICS -> "Diagnostics"
+                ReadySection.DIAGNOSTICS -> "Health"
                 ReadySection.SETTINGS -> "Settings"
             }
             NavigationBarItem(

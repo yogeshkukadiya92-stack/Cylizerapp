@@ -2,7 +2,12 @@ import type {
   CallLog,
   Employee,
   EmployeeDevice,
+  FollowUp,
   JsonValue,
+  Lead,
+  LeadActivity,
+  LeadNote,
+  LeadStatus,
   Organization,
   Permission,
   Role,
@@ -147,12 +152,18 @@ export function makeActor(row: DbRow, roles: Role[]): ActorContext | undefined {
     .map((systemKey) => roles.find((role) => role.systemKey === systemKey))
     .find((role) => role !== undefined);
   if (!primaryRole?.systemKey) return undefined;
+  const leadScope: ActorContext["leadScope"] = primaryRole.systemKey === "manager"
+    ? { kind: "teams", teamNames: stringArray(row.lead_team_names) }
+    : primaryRole.systemKey === "employee"
+      ? { kind: "assigned", employeeId: optionalString(row.linked_employee_id) ?? "" }
+      : { kind: "organization" };
   return {
     user: mapUser(row, roles.map((role) => role.id)),
     organization: mapOrganization(row),
     roles,
     permissions: [...new Set(roles.flatMap((role) => role.permissions))],
     roleKey: primaryRole.systemKey,
+    leadScope,
   };
 }
 
@@ -186,6 +197,114 @@ export function mapEmployee(row: DbRow): Employee {
         endsAt: timeValue(workingEndsAt),
       },
     } : {}),
+  };
+}
+
+export function mapLeadStatus(row: DbRow): LeadStatus {
+  return {
+    id: requiredString(row.id, "lead status id"),
+    organizationId: requiredString(row.organization_id, "lead status organization id"),
+    name: requiredString(row.name, "lead status name"),
+    color: requiredString(row.color, "lead status color"),
+    position: requiredNumber(row.position, "lead status position"),
+    isInitial: row.is_initial === true,
+    isWon: row.is_won === true,
+    isLost: row.is_lost === true,
+    isActive: row.is_active === true,
+  };
+}
+
+export function mapLead(row: DbRow): Lead {
+  const customFields = objectValue(row.custom_fields) as Record<string, JsonValue>;
+  return {
+    id: requiredString(row.id, "lead id"),
+    organizationId: requiredString(row.organization_id, "lead organization id"),
+    firstName: requiredString(row.first_name, "lead first name"),
+    phoneNumber: requiredString(row.phone_number, "lead phone number"),
+    source: requiredString(row.source, "lead source") as Lead["source"],
+    statusId: requiredString(row.status_id, "lead status id"),
+    tagIds: stringArray(
+      typeof row.tag_ids === "string" ? (() => {
+        try { return JSON.parse(row.tag_ids) as unknown; } catch { return []; }
+      })() : row.tag_ids,
+    ),
+    customFields,
+    version: requiredNumber(row.version, "lead version"),
+    createdAt: dateTime(row.created_at, "lead created_at"),
+    updatedAt: dateTime(row.updated_at, "lead updated_at"),
+    ...optionalField("lastName", optionalString(row.last_name)),
+    ...optionalField("companyName", optionalString(row.company_name)),
+    ...optionalField("alternatePhoneNumber", optionalString(row.alternate_phone_number)),
+    ...optionalField("email", optionalString(row.email)),
+    ...optionalField("sourceReference", optionalString(row.source_reference)),
+    ...optionalField("temperature", optionalString(row.temperature) as Lead["temperature"] | undefined),
+    ...optionalField("assignedEmployeeId", optionalString(row.assigned_employee_id)),
+    ...optionalField("lastContactedAt", optionalDateTime(row.last_contacted_at)),
+    ...optionalField("nextFollowUpAt", optionalDateTime(row.next_follow_up_at)),
+    ...optionalField("convertedAt", optionalDateTime(row.converted_at)),
+    ...optionalField("lostAt", optionalDateTime(row.lost_at)),
+    ...optionalField("archivedAt", optionalDateTime(row.archived_at)),
+    ...optionalField("createdBy", optionalString(row.created_by_user_id)),
+    ...optionalField("updatedBy", optionalString(row.updated_by_user_id)),
+  };
+}
+
+export function mapLeadNote(row: DbRow): LeadNote {
+  const authorUserId = requiredString(row.author_user_id, "lead note author id");
+  return {
+    id: requiredString(row.id, "lead note id"),
+    organizationId: requiredString(row.organization_id, "lead note organization id"),
+    leadId: requiredString(row.lead_id, "lead note lead id"),
+    authorUserId,
+    body: requiredString(row.body, "lead note body"),
+    isPinned: row.is_pinned === true,
+    createdAt: dateTime(row.created_at, "lead note created_at"),
+    updatedAt: dateTime(row.updated_at, "lead note updated_at"),
+    createdBy: authorUserId,
+    updatedBy: authorUserId,
+  };
+}
+
+export function mapLeadFollowUp(row: DbRow, at?: string): FollowUp {
+  const storedStatus = requiredString(row.status, "lead follow-up status") as FollowUp["status"];
+  const dueAt = dateTime(row.due_at, "lead follow-up due_at");
+  const status = storedStatus === "pending" && at !== undefined && dueAt < at ? "overdue" : storedStatus;
+  const createdBy = requiredString(row.created_by_user_id, "lead follow-up creator id");
+  return {
+    id: requiredString(row.id, "lead follow-up id"),
+    organizationId: requiredString(row.organization_id, "lead follow-up organization id"),
+    leadId: requiredString(row.lead_id, "lead follow-up lead id"),
+    assignedEmployeeId: requiredString(row.assigned_employee_id, "lead follow-up assignee id"),
+    title: requiredString(row.title, "lead follow-up title"),
+    dueAt,
+    priority: requiredString(row.priority, "lead follow-up priority") as FollowUp["priority"],
+    status,
+    version: requiredNumber(row.version, "lead follow-up version"),
+    createdAt: dateTime(row.created_at, "lead follow-up created_at"),
+    updatedAt: dateTime(row.updated_at, "lead follow-up updated_at"),
+    createdBy,
+    ...optionalField("updatedBy", optionalString(row.completed_by_user_id ?? row.cancelled_by_user_id ?? row.created_by_user_id)),
+    ...optionalField("notes", optionalString(row.notes)),
+    ...optionalField("reminderAt", optionalDateTime(row.reminder_at)),
+    ...optionalField("completedAt", optionalDateTime(row.completed_at)),
+    ...optionalField("completedByUserId", optionalString(row.completed_by_user_id)),
+  };
+}
+
+export function mapLeadActivity(row: DbRow): LeadActivity {
+  return {
+    id: requiredString(row.id, "lead activity id"),
+    organizationId: requiredString(row.organization_id, "lead activity organization id"),
+    leadId: requiredString(row.lead_id, "lead activity lead id"),
+    kind: requiredString(row.kind, "lead activity kind") as LeadActivity["kind"],
+    occurredAt: dateTime(row.occurred_at, "lead activity occurred_at"),
+    summary: requiredString(row.summary, "lead activity summary"),
+    ...optionalField("actorUserId", optionalString(row.actor_user_id)),
+    ...optionalField("actorEmployeeId", optionalString(row.actor_employee_id)),
+    ...optionalField("callLogId", optionalString(row.call_log_id)),
+    ...optionalField("metadata", Object.keys(objectValue(row.metadata)).length === 0
+      ? undefined
+      : objectValue(row.metadata) as Record<string, JsonValue>),
   };
 }
 

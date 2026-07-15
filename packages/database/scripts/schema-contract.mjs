@@ -13,6 +13,7 @@ export const tenantTables = [
   "organization_memberships",
   "role_permissions",
   "membership_roles",
+  "membership_team_scopes",
   "user_identities",
   "teams",
   "employees",
@@ -26,6 +27,12 @@ export const tenantTables = [
   "call_ingest_batches",
   "call_logs",
   "call_notes",
+  "lead_statuses",
+  "leads",
+  "lead_notes",
+  "lead_follow_ups",
+  "lead_activities",
+  "call_lead_links",
   "audit_events",
   "api_idempotency_keys",
   "outbox_events",
@@ -324,6 +331,34 @@ export function collectSchemaDiagnostics() {
     [
       /create or replace function callora\.device_has_current_collection_consent\([\s\S]*current_policy\.id = receipt\.policy_id[\s\S]*current_policy\.content_hash = receipt\.policy_content_hash/i,
       "Mobile authorization cannot prove consent to the exact current policy.",
+    ],
+    [
+      /create table callora\.membership_team_scopes[\s\S]*primary key \(organization_id, membership_id, team_id\)[\s\S]*foreign key \(organization_id, membership_id\)[\s\S]*foreign key \(organization_id, team_id\)/i,
+      "Memberships cannot be restricted to exact same-tenant team scopes.",
+    ],
+    [
+      /create table callora\.leads[\s\S]*phone_encryption_version smallint not null default 2[\s\S]*phone_number_ciphertext bytea not null[\s\S]*phone_number_nonce bytea not null[\s\S]*phone_number_blind_index bytea not null/i,
+      "Lead phone numbers are not stored as encrypted, blind-indexed envelopes.",
+    ],
+    [
+      /create trigger leads_require_next_version[\s\S]*before update on callora\.leads[\s\S]*require_next_lead_version/i,
+      "Lead optimistic-concurrency updates are not guarded by a version trigger.",
+    ],
+    [
+      /create trigger lead_activities_append_only[\s\S]*before update or delete on callora\.lead_activities/i,
+      "Lead activity history is not immutable.",
+    ],
+    [
+      /create unique index call_lead_links_one_active_call_key[\s\S]*organization_id, call_log_id[\s\S]*where unlinked_at is null/i,
+      "A call can be actively linked to multiple leads.",
+    ],
+    [
+      /constraint call_lead_links_call_log_fk foreign key \(organization_id, call_log_id\)[\s\S]*constraint call_lead_links_lead_fk foreign key \(organization_id, lead_id\)/i,
+      "Call-to-lead history does not enforce same-tenant references.",
+    ],
+    [
+      /constraint lead_follow_ups_state_complete check[\s\S]*status = 'pending'[\s\S]*status = 'completed'[\s\S]*status = 'cancelled'/i,
+      "Lead follow-up lifecycle states are not structurally complete.",
     ],
   ];
 

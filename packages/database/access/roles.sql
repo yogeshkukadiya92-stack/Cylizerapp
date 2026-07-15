@@ -251,6 +251,31 @@ to callora_api;
 
 grant select, insert on callora.audit_events to callora_api;
 
+-- Phase 4A CRM tables start from a deny-all baseline on every replay. Leads,
+-- follow-ups, and correction history use lifecycle transitions instead of
+-- destructive deletes; append-only activity history can only be inserted.
+revoke all on
+  callora.membership_team_scopes,
+  callora.lead_statuses,
+  callora.leads,
+  callora.lead_notes,
+  callora.lead_follow_ups,
+  callora.lead_activities,
+  callora.call_lead_links
+from
+  callora_api, callora_ingest, callora_auditor, callora_worker,
+  callora_call_writer, callora_pii_migrator;
+
+grant select, insert, delete on callora.membership_team_scopes to callora_api;
+grant select, insert, update on
+  callora.lead_statuses,
+  callora.leads,
+  callora.lead_notes,
+  callora.lead_follow_ups,
+  callora.call_lead_links
+to callora_api;
+grant select, insert on callora.lead_activities to callora_api;
+
 grant select on
   callora.organizations,
   callora.employees,
@@ -319,6 +344,7 @@ grant select on
   callora.organization_memberships,
   callora.role_permissions,
   callora.membership_roles,
+  callora.membership_team_scopes,
   callora.teams,
   callora.employees,
   callora.employee_devices,
@@ -332,6 +358,12 @@ grant select on
   callora.call_ingest_batches,
   callora.call_logs,
   callora.call_notes,
+  callora.lead_statuses,
+  callora.leads,
+  callora.lead_notes,
+  callora.lead_follow_ups,
+  callora.lead_activities,
+  callora.call_lead_links,
   callora.audit_events,
   callora.outbox_events
 to callora_auditor;

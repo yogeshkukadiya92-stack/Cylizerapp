@@ -22,7 +22,7 @@ const MAX_PLAINTEXT_BYTES = 65_536;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BASE64URL_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
-export type CallPiiField = "phone_number" | "contact_name";
+export type CallPiiField = "phone_number" | "alternate_phone_number" | "contact_name";
 
 export interface CallPiiContext {
   organizationId: string;
@@ -260,7 +260,7 @@ function canonicalUuid(value: string, name: string): string {
 }
 
 function assertField(value: string): asserts value is CallPiiField {
-  if (value !== "phone_number" && value !== "contact_name") {
+  if (value !== "phone_number" && value !== "alternate_phone_number" && value !== "contact_name") {
     throw new TypeError("Call-log PII field is unsupported");
   }
 }

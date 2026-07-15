@@ -11,7 +11,10 @@ import {
   isCallDisposition,
   isCallLogSyncBatch,
   isDeviceHeartbeat,
+  isFollowUpPriority,
   isIsoDateTime,
+  isLeadQueueKey,
+  isLeadSource,
   isMobileActivationInput,
   isMobileCollectionMode,
   isMobileReconsentInput,
@@ -24,13 +27,21 @@ import {
   isRequestId,
   isProposedDeviceCredential,
   type CallLog,
+  type CompleteFollowUpInput,
   type CreateEmployeeInput,
+  type CreateFollowUpInput,
+  type CreateLeadInput,
+  type CreateLeadNoteInput,
   type DevicePermissionState,
   type DevicePermissions,
   type Employee,
   type EmployeeStatus,
+  type JsonValue,
+  type LeadTemperature,
   type Permission,
   type SystemRoleKey,
+  type UpdateLeadInput,
+  type UpdateLeadRequest,
 } from "@callora/contracts";
 import { buildDashboardOverview, type DashboardPreset, type DashboardQuery } from "./analytics.js";
 import {
@@ -185,6 +196,196 @@ function parseCreateEmployeeInput(body: Record<string, unknown>): CreateEmployee
     ...(optionalString(body.jobTitle, "jobTitle", 100) === undefined ? {} : { jobTitle: optionalString(body.jobTitle, "jobTitle", 100) as string }),
     ...(optionalString(body.team, "team", 100) === undefined ? {} : { team: optionalString(body.team, "team", 100) as string }),
     ...(managerEmployeeId === undefined ? {} : { managerEmployeeId }),
+  };
+}
+
+function nullableOptionalString(
+  value: unknown,
+  field: string,
+  maximumLength: number,
+): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  return requiredString(value, field, maximumLength);
+}
+
+function e164Phone(value: unknown, field: string): string {
+  const phoneNumber = requiredString(value, field, 20);
+  if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) {
+    throw badRequest(`${field} must be in E.164 format`, field);
+  }
+  return phoneNumber;
+}
+
+function optionalEmail(value: unknown, field: string): string | undefined {
+  const email = optionalString(value, field, 320)?.toLocaleLowerCase();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw badRequest(`${field} is invalid`, field);
+  }
+  return email;
+}
+
+function nullableOptionalEmail(value: unknown, field: string): string | null | undefined {
+  if (value === undefined || value === null) return value;
+  return optionalEmail(value, field);
+}
+
+function leadTemperature(value: unknown, field: string): LeadTemperature | undefined {
+  if (value === undefined) return undefined;
+  if (["cold", "warm", "hot"].includes(value as string)) return value as LeadTemperature;
+  throw badRequest(`${field} must be cold, warm, or hot`, field);
+}
+
+function leadTagIds(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 50) {
+    throw badRequest(`${field} must be an array containing at most 50 IDs`, field);
+  }
+  const tags = value.map((tag, index) => requiredString(tag, `${field}.${index}`, 100));
+  if (new Set(tags).size !== tags.length) throw badRequest(`${field} must not contain duplicates`, field);
+  return tags;
+}
+
+function isJsonValue(value: unknown, depth = 0): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (depth >= 8) return false;
+  if (Array.isArray(value)) return value.length <= 100 && value.every((item) => isJsonValue(item, depth + 1));
+  return isRecord(value) && Object.keys(value).length <= 100 &&
+    Object.values(value).every((item) => isJsonValue(item, depth + 1));
+}
+
+function leadCustomFields(value: unknown, field: string): Record<string, JsonValue> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || Object.keys(value).length > 100 ||
+    Object.keys(value).some((key) => !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) ||
+    !Object.values(value).every((item) => isJsonValue(item))) {
+    throw badRequest(`${field} must be a JSON object with valid field keys and values`, field);
+  }
+  if (JSON.stringify(value).length > 65_536) throw badRequest(`${field} is too large`, field);
+  return value as Record<string, JsonValue>;
+}
+
+function parseCreateLeadInput(body: Record<string, unknown>): CreateLeadInput {
+  const lastName = optionalString(body.lastName, "lastName", 200);
+  const companyName = optionalString(body.companyName, "companyName", 300);
+  const alternatePhoneNumber = body.alternatePhoneNumber === undefined
+    ? undefined
+    : e164Phone(body.alternatePhoneNumber, "alternatePhoneNumber");
+  const email = optionalEmail(body.email, "email");
+  const source = body.source ?? "manual";
+  if (!isLeadSource(source)) throw badRequest("source is invalid", "source");
+  const sourceReference = optionalString(body.sourceReference, "sourceReference", 255);
+  const statusId = optionalString(body.statusId, "statusId", 100);
+  const temperature = leadTemperature(body.temperature, "temperature");
+  const assignedEmployeeId = optionalString(body.assignedEmployeeId, "assignedEmployeeId", 100);
+  const tagIds = leadTagIds(body.tagIds, "tagIds");
+  const customFields = leadCustomFields(body.customFields, "customFields");
+  return {
+    firstName: requiredString(body.firstName, "firstName", 200),
+    phoneNumber: e164Phone(body.phoneNumber, "phoneNumber"),
+    source,
+    ...(lastName === undefined ? {} : { lastName }),
+    ...(companyName === undefined ? {} : { companyName }),
+    ...(alternatePhoneNumber === undefined ? {} : { alternatePhoneNumber }),
+    ...(email === undefined ? {} : { email }),
+    ...(sourceReference === undefined ? {} : { sourceReference }),
+    ...(statusId === undefined ? {} : { statusId }),
+    ...(temperature === undefined ? {} : { temperature }),
+    ...(assignedEmployeeId === undefined ? {} : { assignedEmployeeId }),
+    ...(tagIds === undefined ? {} : { tagIds }),
+    ...(customFields === undefined ? {} : { customFields }),
+  };
+}
+
+function parseUpdateLeadRequest(body: Record<string, unknown>): UpdateLeadRequest {
+  if (!Number.isSafeInteger(body.expectedVersion) || (body.expectedVersion as number) < 1) {
+    throw badRequest("expectedVersion must be a positive integer", "expectedVersion");
+  }
+  if (!isRecord(body.changes) || Object.keys(body.changes).length === 0) {
+    throw badRequest("changes must contain at least one lead update", "changes");
+  }
+  const allowed = new Set([
+    "firstName", "lastName", "companyName", "phoneNumber", "alternatePhoneNumber", "email",
+    "statusId", "temperature", "assignedEmployeeId", "tagIds", "customFields", "archived",
+  ]);
+  const unknown = Object.keys(body.changes).find((key) => !allowed.has(key));
+  if (unknown) throw badRequest(`changes.${unknown} is not supported`, `changes.${unknown}`);
+  const value = body.changes;
+  const changes: UpdateLeadInput = {};
+  if (value.firstName !== undefined) changes.firstName = requiredString(value.firstName, "changes.firstName", 200);
+  const lastName = nullableOptionalString(value.lastName, "changes.lastName", 200);
+  if (lastName !== undefined) changes.lastName = lastName;
+  const companyName = nullableOptionalString(value.companyName, "changes.companyName", 300);
+  if (companyName !== undefined) changes.companyName = companyName;
+  if (value.phoneNumber !== undefined) changes.phoneNumber = e164Phone(value.phoneNumber, "changes.phoneNumber");
+  if (value.alternatePhoneNumber !== undefined) {
+    changes.alternatePhoneNumber = value.alternatePhoneNumber === null
+      ? null
+      : e164Phone(value.alternatePhoneNumber, "changes.alternatePhoneNumber");
+  }
+  const email = nullableOptionalEmail(value.email, "changes.email");
+  if (email !== undefined) changes.email = email;
+  if (value.statusId !== undefined) changes.statusId = requiredString(value.statusId, "changes.statusId", 100);
+  if (value.temperature !== undefined) {
+    changes.temperature = value.temperature === null
+      ? null
+      : leadTemperature(value.temperature, "changes.temperature") as LeadTemperature;
+  }
+  if (value.assignedEmployeeId !== undefined) {
+    changes.assignedEmployeeId = value.assignedEmployeeId === null
+      ? null
+      : requiredString(value.assignedEmployeeId, "changes.assignedEmployeeId", 100);
+  }
+  const tagIds = leadTagIds(value.tagIds, "changes.tagIds");
+  if (tagIds !== undefined) changes.tagIds = tagIds;
+  const customFields = leadCustomFields(value.customFields, "changes.customFields");
+  if (customFields !== undefined) changes.customFields = customFields;
+  if (value.archived !== undefined) {
+    if (typeof value.archived !== "boolean") throw badRequest("changes.archived must be a boolean", "changes.archived");
+    changes.archived = value.archived;
+  }
+  return { expectedVersion: body.expectedVersion as number, changes };
+}
+
+function parseCreateLeadNoteInput(body: Record<string, unknown>): CreateLeadNoteInput {
+  if (body.isPinned !== undefined && typeof body.isPinned !== "boolean") {
+    throw badRequest("isPinned must be a boolean", "isPinned");
+  }
+  return {
+    body: requiredString(body.body, "body", 10_000),
+    ...(body.isPinned === undefined ? {} : { isPinned: body.isPinned }),
+  };
+}
+
+function parseCreateFollowUpInput(body: Record<string, unknown>): CreateFollowUpInput {
+  const dueAt = asTimestamp(body.dueAt, "dueAt");
+  if (!dueAt) throw badRequest("dueAt is required", "dueAt");
+  const reminderAt = asTimestamp(body.reminderAt, "reminderAt");
+  if (reminderAt && reminderAt > dueAt) throw badRequest("reminderAt cannot be after dueAt", "reminderAt");
+  const priority = body.priority ?? "normal";
+  if (!isFollowUpPriority(priority)) throw badRequest("priority is invalid", "priority");
+  const notes = optionalString(body.notes, "notes", 10_000);
+  return {
+    leadId: requiredString(body.leadId, "leadId", 100),
+    assignedEmployeeId: requiredString(body.assignedEmployeeId, "assignedEmployeeId", 100),
+    title: requiredString(body.title, "title", 300),
+    dueAt,
+    priority,
+    ...(notes === undefined ? {} : { notes }),
+    ...(reminderAt === undefined ? {} : { reminderAt }),
+  };
+}
+
+function parseCompleteFollowUpInput(body: Record<string, unknown>): CompleteFollowUpInput {
+  if (!Number.isSafeInteger(body.expectedVersion) || (body.expectedVersion as number) < 1) {
+    throw badRequest("expectedVersion must be a positive integer", "expectedVersion");
+  }
+  const completionNote = optionalString(body.completionNote, "completionNote", 10_000);
+  const completedAt = asTimestamp(body.completedAt, "completedAt");
+  return {
+    expectedVersion: body.expectedVersion as number,
+    ...(completionNote === undefined ? {} : { completionNote }),
+    ...(completedAt === undefined ? {} : { completedAt }),
   };
 }
 
@@ -360,7 +561,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       callback(null, false);
     },
     credentials: false,
-    methods: ["GET", "POST", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["authorization", "content-type", "idempotency-key", "x-request-id"],
     maxAge: 600,
     strictPreflight: true,
@@ -699,6 +900,261 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return success(request, employee);
   });
 
+  app.get("/v1/lead-statuses", { preHandler: protect("leads.read") }, async (request) => {
+    const actor = currentActor(request);
+    const items = await repository.listLeadStatuses(actor.organization.id);
+    return success(request, { items });
+  });
+
+  app.get("/v1/lead-owners", { preHandler: protect("leads.read") }, async (request) => {
+    const actor = currentActor(request);
+    let employees: Employee[] = [];
+    if (actor.leadScope.kind === "organization") {
+      employees = (await repository.listEmployees({
+        organizationId: actor.organization.id,
+        filter: { status: "active" },
+        limit: 100,
+      })).items;
+    } else if (actor.leadScope.kind === "teams") {
+      const pages = await Promise.all(actor.leadScope.teamNames.map((team) => repository.listEmployees({
+        organizationId: actor.organization.id,
+        filter: { status: "active", team },
+        limit: 100,
+      })));
+      employees = pages.flatMap((page) => page.items);
+    } else if (actor.leadScope.employeeId) {
+      const employee = await repository.findEmployee(actor.organization.id, actor.leadScope.employeeId);
+      if (employee?.status === "active") employees = [employee];
+    }
+    const unique = [...new Map(employees.map((employee) => [employee.id, employee])).values()]
+      .sort((left, right) => left.displayName.localeCompare(right.displayName) || left.id.localeCompare(right.id));
+    return success(request, {
+      items: unique.map((employee) => ({
+        id: employee.id,
+        displayName: employee.displayName,
+        ...(employee.team === undefined ? {} : { team: employee.team }),
+      })),
+    });
+  });
+
+  app.get("/v1/leads", { preHandler: protect("leads.read") }, async (request) => {
+    const actor = currentActor(request);
+    const query = queryRecord(request);
+    const limit = integerQuery(query.limit, "limit", 50, 100);
+    const cursorValue = optionalQueryString(query.cursor, "cursor");
+    const after = cursorValue === undefined
+      ? undefined
+      : cursors.decode<{ createdAt: string; id: string }>(cursorValue, "leads", actor.organization.id);
+    if (after && (!isIsoDateTime(after.createdAt) || !isNonEmptyString(after.id))) {
+      throw badRequest("The cursor payload is invalid", "cursor");
+    }
+    const queue = optionalQueryString(query.queue, "queue") ?? "all";
+    if (!isLeadQueueKey(queue)) throw badRequest("queue is invalid", "queue");
+    const search = optionalQueryString(query.search, "search");
+    if (search && search.length > 160) throw badRequest("search must not exceed 160 characters", "search");
+    const statusId = optionalQueryString(query.statusId, "statusId");
+    const assignedEmployeeId = optionalQueryString(query.assignedEmployeeId, "assignedEmployeeId");
+    const generatedAt = clock.now().toISOString();
+    const result = await repository.listLeads({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      filter: {
+        queue,
+        ...(search === undefined ? {} : { search }),
+        ...(statusId === undefined ? {} : { statusId }),
+        ...(assignedEmployeeId === undefined ? {} : { assignedEmployeeId }),
+      },
+      ...(after === undefined ? {} : { after }),
+      limit,
+      at: generatedAt,
+    });
+    const last = result.items.at(-1)?.lead;
+    const nextCursor = result.hasMore && last
+      ? cursors.encode("leads", actor.organization.id, { createdAt: last.createdAt, id: last.id })
+      : undefined;
+    return success(request, {
+      items: result.items,
+      summary: result.summary,
+      generatedAt,
+      timeZone: actor.organization.settings.timeZone,
+      cursorInfo: { hasMore: result.hasMore, ...(nextCursor === undefined ? {} : { nextCursor }) },
+    });
+  });
+
+  app.get("/v1/leads/:leadId", { preHandler: protect("leads.read") }, async (request) => {
+    const actor = currentActor(request);
+    const params = isRecord(request.params) ? request.params : {};
+    const leadId = requiredString(params.leadId, "leadId", 100);
+    const detail = await repository.findLeadDetail({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      leadId,
+      at: clock.now().toISOString(),
+    });
+    if (!detail) throw notFound("Lead not found");
+    return success(request, detail);
+  });
+
+  app.post("/v1/leads", { preHandler: protect("leads.manage") }, async (request, reply) => {
+    const actor = currentActor(request);
+    let input = parseCreateLeadInput(bodyRecord(request));
+    if (actor.leadScope.kind === "assigned") {
+      if (!actor.leadScope.employeeId) throw forbidden("No active employee profile is linked to this user");
+      if (input.assignedEmployeeId && input.assignedEmployeeId !== actor.leadScope.employeeId) throw forbidden();
+      input = { ...input, assignedEmployeeId: actor.leadScope.employeeId };
+    } else if (actor.leadScope.kind === "teams" && !input.assignedEmployeeId) {
+      throw badRequest("assignedEmployeeId is required for a team-scoped lead", "assignedEmployeeId");
+    }
+    const at = clock.now().toISOString();
+    const detail = await repository.createLead({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      input,
+      actorUserId: actor.user.id,
+      at,
+    });
+    if (!detail) throw badRequest("The status or assigned employee is not available in your lead scope");
+    await audit({
+      organizationId: actor.organization.id,
+      actorUserId: actor.user.id,
+      action: "lead.created",
+      entityType: "lead",
+      entityId: detail.item.lead.id,
+      metadata: {
+        source: detail.item.lead.source,
+        statusId: detail.item.lead.statusId,
+        assignedEmployeeId: detail.item.lead.assignedEmployeeId ?? null,
+      },
+    }, at);
+    return reply.status(201).send(success(request, detail));
+  });
+
+  app.patch("/v1/leads/:leadId", { preHandler: protect("leads.manage") }, async (request) => {
+    const actor = currentActor(request);
+    const params = isRecord(request.params) ? request.params : {};
+    const leadId = requiredString(params.leadId, "leadId", 100);
+    const update = parseUpdateLeadRequest(bodyRecord(request));
+    const canAssign = actor.permissions.includes("leads.assign");
+    if (update.changes.assignedEmployeeId !== undefined && !canAssign) throw forbidden("Lead assignment permission is required");
+    const at = clock.now().toISOString();
+    const before = await repository.findLeadDetail({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      leadId,
+      at,
+    });
+    if (!before) throw notFound("Lead not found");
+    const detail = await repository.updateLead({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      leadId,
+      request: update,
+      actorUserId: actor.user.id,
+      canAssign,
+      at,
+    });
+    if (!detail) throw notFound("Lead not found");
+    await audit({
+      organizationId: actor.organization.id,
+      actorUserId: actor.user.id,
+      action: "lead.updated",
+      entityType: "lead",
+      entityId: leadId,
+      metadata: {
+        oldVersion: before.item.lead.version,
+        newVersion: detail.item.lead.version,
+        oldStatusId: before.item.lead.statusId,
+        newStatusId: detail.item.lead.statusId,
+        oldAssignedEmployeeId: before.item.lead.assignedEmployeeId ?? null,
+        newAssignedEmployeeId: detail.item.lead.assignedEmployeeId ?? null,
+      },
+    }, at);
+    return success(request, detail);
+  });
+
+  app.post("/v1/leads/:leadId/notes", { preHandler: protect("leads.manage") }, async (request, reply) => {
+    const actor = currentActor(request);
+    const params = isRecord(request.params) ? request.params : {};
+    const leadId = requiredString(params.leadId, "leadId", 100);
+    const input = parseCreateLeadNoteInput(bodyRecord(request));
+    const at = clock.now().toISOString();
+    const detail = await repository.createLeadNote({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      leadId,
+      input,
+      actorUserId: actor.user.id,
+      at,
+    });
+    if (!detail) throw notFound("Lead not found");
+    await audit({
+      organizationId: actor.organization.id,
+      actorUserId: actor.user.id,
+      action: "lead.note_added",
+      entityType: "lead",
+      entityId: leadId,
+      metadata: { isPinned: input.isPinned ?? false },
+    }, at);
+    return reply.status(201).send(success(request, detail));
+  });
+
+  app.post("/v1/leads/:leadId/follow-ups", { preHandler: protect("leads.manage") }, async (request, reply) => {
+    const actor = currentActor(request);
+    const params = isRecord(request.params) ? request.params : {};
+    const leadId = requiredString(params.leadId, "leadId", 100);
+    const input = parseCreateFollowUpInput(bodyRecord(request));
+    if (input.leadId !== leadId) throw badRequest("leadId must match the route", "leadId");
+    const at = clock.now().toISOString();
+    const detail = await repository.createLeadFollowUp({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      leadId,
+      input,
+      actorUserId: actor.user.id,
+      at,
+    });
+    if (!detail) throw notFound("Lead or assigned employee not found");
+    const createdFollowUp = detail.followUps.find((followUp) =>
+      followUp.createdAt === at && followUp.assignedEmployeeId === input.assignedEmployeeId &&
+      followUp.dueAt === input.dueAt);
+    if (!createdFollowUp) throw new Error("Created follow-up is missing from the lead detail");
+    await audit({
+      organizationId: actor.organization.id,
+      actorUserId: actor.user.id,
+      action: "follow_up.created",
+      entityType: "follow_up",
+      entityId: createdFollowUp.id,
+      metadata: { leadId, assignedEmployeeId: createdFollowUp.assignedEmployeeId, priority: createdFollowUp.priority },
+    }, at);
+    return reply.status(201).send(success(request, detail));
+  });
+
+  app.post("/v1/follow-ups/:followUpId/complete", { preHandler: protect("leads.manage") }, async (request) => {
+    const actor = currentActor(request);
+    const params = isRecord(request.params) ? request.params : {};
+    const followUpId = requiredString(params.followUpId, "followUpId", 100);
+    const input = parseCompleteFollowUpInput(bodyRecord(request));
+    const at = clock.now().toISOString();
+    const detail = await repository.completeLeadFollowUp({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      followUpId,
+      input,
+      actorUserId: actor.user.id,
+      at,
+    });
+    if (!detail) throw notFound("Follow-up not found");
+    await audit({
+      organizationId: actor.organization.id,
+      actorUserId: actor.user.id,
+      action: "follow_up.completed",
+      entityType: "follow_up",
+      entityId: followUpId,
+      metadata: { leadId: detail.item.lead.id, newVersion: input.expectedVersion + 1 },
+    }, at);
+    return success(request, detail);
+  });
+
   app.post("/v1/employees/:employeeId/pairing-codes", { preHandler: protectOrganizationAdmin("devices.manage") }, async (request, reply) => {
     const actor = currentActor(request);
     const params = isRecord(request.params) ? request.params : {};
@@ -984,6 +1440,63 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       policy: result.policy,
       consentedAt: result.consentedAt,
     });
+  });
+
+  app.get("/v1/mobile/leads", { preHandler: authenticateMobile("session") }, async (request) => {
+    const context = currentMobileDevice(request);
+    if (!context.consentCurrent) throw consentRequired();
+    const query = queryRecord(request);
+    const limit = integerQuery(query.limit, "limit", 50, 100);
+    const cursorValue = optionalQueryString(query.cursor, "cursor");
+    const after = cursorValue === undefined
+      ? undefined
+      : cursors.decode<{ createdAt: string; id: string }>(cursorValue, "mobile-leads", context.organizationId);
+    if (after && (!isIsoDateTime(after.createdAt) || !isNonEmptyString(after.id))) {
+      throw badRequest("The cursor payload is invalid", "cursor");
+    }
+    const queue = optionalQueryString(query.queue, "queue") ?? "all";
+    if (!isLeadQueueKey(queue)) throw badRequest("queue is invalid", "queue");
+    const search = optionalQueryString(query.search, "search");
+    if (search && search.length > 160) throw badRequest("search must not exceed 160 characters", "search");
+    const statusId = optionalQueryString(query.statusId, "statusId");
+    const generatedAt = clock.now().toISOString();
+    const result = await repository.listLeads({
+      organizationId: context.organizationId,
+      scope: { kind: "assigned", employeeId: context.employeeId },
+      filter: {
+        queue,
+        ...(search === undefined ? {} : { search }),
+        ...(statusId === undefined ? {} : { statusId }),
+      },
+      ...(after === undefined ? {} : { after }),
+      limit,
+      at: generatedAt,
+    });
+    const last = result.items.at(-1)?.lead;
+    const nextCursor = result.hasMore && last
+      ? cursors.encode("mobile-leads", context.organizationId, { createdAt: last.createdAt, id: last.id })
+      : undefined;
+    return success(request, {
+      items: result.items,
+      summary: result.summary,
+      generatedAt,
+      cursorInfo: { hasMore: result.hasMore, ...(nextCursor === undefined ? {} : { nextCursor }) },
+    });
+  });
+
+  app.get("/v1/mobile/leads/:leadId", { preHandler: authenticateMobile("session") }, async (request) => {
+    const context = currentMobileDevice(request);
+    if (!context.consentCurrent) throw consentRequired();
+    const params = isRecord(request.params) ? request.params : {};
+    const leadId = requiredString(params.leadId, "leadId", 100);
+    const detail = await repository.findLeadDetail({
+      organizationId: context.organizationId,
+      scope: { kind: "assigned", employeeId: context.employeeId },
+      leadId,
+      at: clock.now().toISOString(),
+    });
+    if (!detail) throw notFound("Lead not found");
+    return success(request, detail);
   });
 
   app.post("/v1/mobile/heartbeat", { preHandler: authenticateMobile("session") }, async (request) => {

@@ -72,18 +72,21 @@ OIDC/JWKS verifier. Startup fails closed if any required database, OIDC, secret,
 or exact-origin setting is missing or invalid. The production web build likewise
 requires Authorization Code + PKCE OIDC and keeps tokens in memory only.
 
-Apply all thirteen migrations and least-privilege role grants before starting the
+Apply all fourteen migrations and least-privilege role grants before starting the
 production API. Do not apply the development seed to staging or production. See
 `docs/PRODUCTION_AUTH_DATABASE_RUNBOOK.md` for the complete configuration,
 identity-linking, rollout, and verification procedure.
 
-Phase 3D now includes server-authoritative content-addressed mobile policies,
-client-proposed hash-only credentials, exact replay, two-phase rotation,
-append-only consent evidence, transactional mobile audit/outbox writes, and a
-shared multi-dimensional pairing limiter. It also adds audited per-device
-administrator recovery and an application-layer phone/contact encryption plus
-blind-index transition. This is still not a production launch sign-off. Live
-PostgreSQL and identity-provider evidence, tenant-by-tenant PII backfill,
-team/self data scopes, observability, managed backup/restore drills, release
-signing, physical-device coverage, and distribution approval remain explicit
-gates. See `docs/PHASE_3D_PRODUCTION_VERIFICATION.md`.
+Phase 4A adds the first complete lead-CRM slice: tenant/team/assigned scopes,
+encrypted lead phone fields with blind-index search, optimistic versions,
+append-only activity history, automatic same-team call matching, a responsive
+web pipeline, and an employee-scoped Android lead workspace with system-dialer
+handoff. CSV import, assignment rules, manual call-link correction UI/API,
+Android post-call mutations, and lead reports remain Phase 4B work. See
+`docs/PHASE_4A_HANDOFF.md` for the exact delivered boundary.
+
+This is still not a production launch sign-off. Live PostgreSQL and
+identity-provider evidence, tenant-by-tenant PII backfill, observability,
+managed backup/restore drills, release signing, physical-device coverage, and
+distribution approval remain explicit gates. See
+`docs/PHASE_3D_PRODUCTION_VERIFICATION.md`.

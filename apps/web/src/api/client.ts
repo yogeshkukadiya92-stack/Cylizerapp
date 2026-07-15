@@ -1,12 +1,24 @@
 import type {
   AdminDeviceRevocationInput,
   AdminDeviceRevocationResult,
+  CompleteFollowUpInput,
   CreateEmployeeInput,
   DashboardSummary,
   Employee,
   EmployeePerformanceRow,
   Permission,
 } from '@callora/contracts'
+import type {
+  CreateLeadFollowUpRequest,
+  CreateLeadRequest,
+  LeadApiDetail,
+  LeadApiListResponse,
+  LeadApiUpdateRequest,
+  LeadNoteRequest,
+  LeadOwnerApiResponse,
+  LeadQuery,
+  LeadStatusApiResponse,
+} from '../features/leads/types'
 
 const DEFAULT_API_URL = 'http://localhost:4100'
 const EMPLOYEE_PAGE_SIZE = 50
@@ -254,6 +266,101 @@ export class CalloraApiClient {
     signal?: AbortSignal,
   ): Promise<Employee> {
     return this.request('/v1/employees', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      accessToken,
+      signal,
+    })
+  }
+
+  getLeads(
+    query: LeadQuery,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadApiListResponse> {
+    const search = new URLSearchParams({ limit: String(query.limit ?? 50) })
+    if (query.search) search.set('search', query.search)
+    if (query.queue && query.queue !== 'all') search.set('queue', query.queue)
+    if (query.statusId) search.set('statusId', query.statusId)
+    if (query.assignedEmployeeId) search.set('assignedEmployeeId', query.assignedEmployeeId)
+    if (query.cursor) search.set('cursor', query.cursor)
+    return this.request(`/v1/leads?${search.toString()}`, { accessToken, signal })
+  }
+
+  getLeadStatuses(accessToken: string, signal?: AbortSignal): Promise<LeadStatusApiResponse> {
+    return this.request('/v1/lead-statuses', { accessToken, signal })
+  }
+
+  getLeadOwners(accessToken: string, signal?: AbortSignal): Promise<LeadOwnerApiResponse> {
+    return this.request('/v1/lead-owners', { accessToken, signal })
+  }
+
+  getLeadDetail(leadId: string, accessToken: string, signal?: AbortSignal): Promise<LeadApiDetail> {
+    return this.request(`/v1/leads/${encodeURIComponent(leadId)}`, { accessToken, signal })
+  }
+
+  createLead(
+    input: CreateLeadRequest,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadApiDetail> {
+    return this.request('/v1/leads', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      accessToken,
+      signal,
+    })
+  }
+
+  updateLead(
+    leadId: string,
+    input: LeadApiUpdateRequest,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadApiDetail> {
+    return this.request(`/v1/leads/${encodeURIComponent(leadId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+      accessToken,
+      signal,
+    })
+  }
+
+  addLeadNote(
+    leadId: string,
+    input: LeadNoteRequest,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadApiDetail> {
+    return this.request(`/v1/leads/${encodeURIComponent(leadId)}/notes`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+      accessToken,
+      signal,
+    })
+  }
+
+  createLeadFollowUp(
+    leadId: string,
+    input: CreateLeadFollowUpRequest,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadApiDetail> {
+    return this.request(`/v1/leads/${encodeURIComponent(leadId)}/follow-ups`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+      accessToken,
+      signal,
+    })
+  }
+
+  completeFollowUp(
+    followUpId: string,
+    input: CompleteFollowUpInput,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadApiDetail> {
+    return this.request(`/v1/follow-ups/${encodeURIComponent(followUpId)}/complete`, {
       method: 'POST',
       body: JSON.stringify(input),
       accessToken,

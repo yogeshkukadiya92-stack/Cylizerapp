@@ -437,7 +437,7 @@ describe("Callora API", () => {
       expect(audit.statusCode).toBe(403);
     });
 
-    it("fails closed for manager and employee until team and self scopes exist", async () => {
+    it("keeps organization-wide routes fail-closed while lead-only manager and employee scopes are enabled", async () => {
       for (const role of ["manager", "employee"] as const) {
         const token = await session(app, "org_alpha", role);
         for (const url of ["/v1/employees", "/v1/calls", "/v1/dashboard/overview"] as const) {
@@ -461,7 +461,22 @@ describe("Callora API", () => {
         payload: { organizationId: "org_alpha", role: "manager" },
       });
       expect(json<SuccessPayload<{ actor: { permissions: string[] } }>>(managerSession).data.actor.permissions)
-        .toEqual(["organization.read"]);
+        .toEqual([
+          "organization.read",
+          "employees.read",
+          "calls.read",
+          "leads.read",
+          "leads.manage",
+          "leads.assign",
+        ]);
+
+      const employeeSession = await app.inject({
+        method: "POST",
+        url: "/v1/dev/session",
+        payload: { organizationId: "org_alpha", role: "employee" },
+      });
+      expect(json<SuccessPayload<{ actor: { permissions: string[] } }>>(employeeSession).data.actor.permissions)
+        .toEqual(["organization.read", "leads.read", "leads.manage"]);
 
       const adminToken = await session(app, "org_alpha", "admin");
       for (const url of ["/v1/employees", "/v1/calls", "/v1/dashboard/overview"] as const) {

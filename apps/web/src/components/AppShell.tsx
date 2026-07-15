@@ -1,13 +1,14 @@
 import type { ReactNode } from 'react'
+import type { AppModule } from '../navigation'
 import { Sidebar } from './Sidebar'
 import { TopBar } from './TopBar'
 
 interface AppShellProps {
   children: ReactNode
-  activeModule: string
+  activeModule: AppModule
   displayName: string
   isSidebarOpen: boolean
-  onModuleChange: (module: string) => void
+  onModuleChange: (module: AppModule) => void
   onSidebarClose: () => void
   onSidebarOpen: () => void
   searchQuery: string

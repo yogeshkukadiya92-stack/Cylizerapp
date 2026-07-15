@@ -142,3 +142,67 @@ describe('CalloraApiClient transport security', () => {
     })
   })
 })
+
+describe('CalloraApiClient lead CRM routes', () => {
+  it('encodes lead list filters and uses scoped metadata routes', async () => {
+    const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => jsonResponse({ ok: true, data: {
+      items: [],
+      summary: { total: 0, notContacted: 0, overdue: 0, unreturnedCalls: 0 },
+      cursorInfo: { hasMore: false },
+    } }))
+    const client = new CalloraApiClient({ fetcher: fetcher as typeof fetch })
+
+    await client.getLeads({
+      search: 'Ramesh & Sons',
+      queue: 'overdue',
+      statusId: 'status/qualified',
+      assignedEmployeeId: 'employee one',
+      limit: 25,
+    }, 'lead-token')
+    const url = new URL(String(fetcher.mock.calls[0][0]))
+
+    expect(url.pathname).toBe('/v1/leads')
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      limit: '25',
+      search: 'Ramesh & Sons',
+      queue: 'overdue',
+      statusId: 'status/qualified',
+      assignedEmployeeId: 'employee one',
+    })
+    expect((fetcher.mock.calls[0][1]?.headers as Headers).get('Authorization')).toBe('Bearer lead-token')
+
+    fetcher.mockResolvedValueOnce(jsonResponse({ ok: true, data: { items: [] } }))
+    await client.getLeadOwners('lead-token')
+    expect(String(fetcher.mock.calls[1][0]).endsWith('/v1/lead-owners')).toBe(true)
+  })
+
+  it('sends compare-and-swap updates and lead workflow mutations to exact routes', async () => {
+    const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => jsonResponse({ ok: true, data: {} }))
+    const client = new CalloraApiClient({ fetcher: fetcher as typeof fetch })
+
+    await client.updateLead('lead/one', {
+      expectedVersion: 4,
+      changes: { statusId: 'status-qualified', assignedEmployeeId: 'employee-2' },
+    }, 'lead-token')
+    await client.addLeadNote('lead/one', { body: 'Interested in the annual order.' }, 'lead-token')
+    await client.createLeadFollowUp('lead/one', {
+      leadId: 'lead/one',
+      assignedEmployeeId: 'employee-2',
+      title: 'Discuss annual order',
+      dueAt: '2026-07-16T08:30:00.000Z',
+      priority: 'high',
+    }, 'lead-token')
+    await client.completeFollowUp('follow/up', { expectedVersion: 2 }, 'lead-token')
+
+    expect(String(fetcher.mock.calls[0][0]).endsWith('/v1/leads/lead%2Fone')).toBe(true)
+    expect(fetcher.mock.calls[0][1]?.method).toBe('PATCH')
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual({
+      expectedVersion: 4,
+      changes: { statusId: 'status-qualified', assignedEmployeeId: 'employee-2' },
+    })
+    expect(String(fetcher.mock.calls[1][0]).endsWith('/v1/leads/lead%2Fone/notes')).toBe(true)
+    expect(String(fetcher.mock.calls[2][0]).endsWith('/v1/leads/lead%2Fone/follow-ups')).toBe(true)
+    expect(String(fetcher.mock.calls[3][0]).endsWith('/v1/follow-ups/follow%2Fup/complete')).toBe(true)
+    expect(JSON.parse(String(fetcher.mock.calls[3][1]?.body))).toEqual({ expectedVersion: 2 })
+  })
+})

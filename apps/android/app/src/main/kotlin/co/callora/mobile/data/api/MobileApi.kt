@@ -69,6 +69,12 @@ interface MobileApi {
 
     suspend fun uploadCallBatch(credentials: DeviceCredentials, batch: CallSyncBatch): CallSyncResult
 
+    suspend fun listAssignedLeads(
+        credentials: DeviceCredentials,
+        queue: String = "all",
+        search: String? = null,
+    ): AssignedLeadPage
+
     suspend fun prepareSessionRotation(
         credentials: DeviceCredentials,
         requestId: String,
@@ -91,6 +97,7 @@ object MobileRoutes {
     const val RECONSENT = "/v1/mobile/reconsent"
     const val HEARTBEAT = "/v1/mobile/heartbeat"
     const val CALL_BATCHES = "/v1/mobile/call-batches"
+    const val LEADS = "/v1/mobile/leads"
     const val ROTATION_PREPARE = "/v1/mobile/session/rotation/prepare"
     const val ROTATION_CONFIRM = "/v1/mobile/session/rotation/confirm"
     const val REVOKE_SESSION = "/v1/mobile/session"

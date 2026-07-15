@@ -1,6 +1,8 @@
-# Callora Android Phase 3C
+# Callora Android Phase 4A
 
-Native Android companion for the Callora dashboard clone. Phase 3C adds pair-first onboarding, a server-authoritative disclosure, client-generated device credentials, crash-safe replay/reconciliation, two-phase rotation, idempotent revocation, and fail-closed consent renewal.
+Native Android companion for the Callora dashboard. The underlying Phase 3C foundation adds pair-first onboarding, a server-authoritative disclosure, client-generated device credentials, crash-safe replay/reconciliation, two-phase rotation, idempotent revocation, and fail-closed consent renewal.
+
+Phase 4A also adds a session-authenticated, employee-scoped Leads workspace. The enrolled employee can search assigned leads, switch between not-contacted/overdue/unreturned queues, review the next follow-up in a bottom sheet, refresh from the server, and launch Android's system dialer. Lead data stays in memory only, is cleared whenever onboarding leaves `READY`, and is never exposed across device re-enrollment. The dial action uses `ACTION_DIAL`; the app does not request `CALL_PHONE`.
 
 This is a technical alpha, not a Play Store-ready release. The enterprise flavor's call-log access requires an approved distribution path, policy/legal review, a real production API origin, release signing, and end-to-end testing on supported devices before deployment.
 
@@ -53,6 +55,8 @@ All successful endpoints return the repository's standard JSON envelope. Authent
 | Renew consent | `POST /v1/mobile/reconsent` | Active session auth; exact-replay policy receipt after a `consent_required` directive |
 | Heartbeat | `POST /v1/mobile/heartbeat` | Reports app/OS, queue state, and exact permission state; handles tagged directives |
 | Upload calls | `POST /v1/mobile/call-batches` | Maximum 100 items; `collectionMode` required; deterministic `Idempotency-Key` and immutable payload |
+| Assigned leads | `GET /v1/mobile/leads` | Current-consent session only; repository enforces the credential employee as an assigned-only scope |
+| Assigned lead detail | `GET /v1/mobile/leads/:leadId` | Returns `404` for another employee or tenant and never accepts a client-supplied employee scope |
 | Prepare rotation | `POST /v1/mobile/session/rotation/prepare` | Old session auth; creates an overlapping pending client-proposed `cls_` credential |
 | Confirm rotation | `POST /v1/mobile/session/rotation/confirm` | Proposed new session auth; uses a distinct confirm UUID plus `prepareRequestId`, promotes new and revokes old, and replays exactly |
 | Revoke session | `DELETE /v1/mobile/session` | UUID body plus matching idempotency key; replay works with the same already-revoked credential |

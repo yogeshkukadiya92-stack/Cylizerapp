@@ -27,6 +27,8 @@ import co.callora.mobile.core.protocol.ProtocolRecoveryPlanner
 import co.callora.mobile.core.protocol.ProtocolPhase
 import co.callora.mobile.core.protocol.RotationConcurrencyGate
 import co.callora.mobile.data.api.BootstrapCredential
+import co.callora.mobile.data.api.AssignedLead
+import co.callora.mobile.data.api.AssignedLeadSummary
 import co.callora.mobile.data.api.DeviceRegistration
 import co.callora.mobile.data.api.MobileApiException
 import co.callora.mobile.data.local.QueueCounts
@@ -44,7 +46,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-enum class ReadySection { STATUS, DIAGNOSTICS, SETTINGS }
+enum class ReadySection { LEADS, STATUS, DIAGNOSTICS, SETTINGS }
 
 data class CalloraUiState(
     val onboarding: OnboardingSnapshot = OnboardingSnapshot(
@@ -55,7 +57,12 @@ data class CalloraUiState(
     val busy: Boolean = false,
     val message: String? = null,
     val errorCode: String? = null,
-    val section: ReadySection = ReadySection.STATUS,
+    val section: ReadySection = ReadySection.LEADS,
+    val assignedLeads: List<AssignedLead> = emptyList(),
+    val leadSummary: AssignedLeadSummary = AssignedLeadSummary(0, 0, 0, 0),
+    val leadsLoading: Boolean = false,
+    val leadsErrorCode: String? = null,
+    val leadsGeneratedAt: String? = null,
     val queueCounts: QueueCounts = QueueCounts(0, 0, 0),
     val lastSuccessfulSyncAt: String? = null,
     val recentErrors: List<String> = emptyList(),
@@ -211,6 +218,18 @@ class CalloraViewModel(
 
     fun selectSection(section: ReadySection) {
         _state.update { it.copy(section = section) }
+        if (section == ReadySection.LEADS) refreshAssignedLeads()
+    }
+
+    fun refreshAssignedLeads() {
+        viewModelScope.launch {
+            val credentials = container.credentialVault.read()
+            if (credentials == null) {
+                _state.update { it.copy(leadsLoading = false, leadsErrorCode = "UNAUTHENTICATED") }
+                return@launch
+            }
+            loadAssignedLeads(credentials)
+        }
     }
 
     fun syncNow() {
@@ -826,9 +845,51 @@ class CalloraViewModel(
                 revocationPending = protocol.phase == ProtocolPhase.REVOKE_PENDING ||
                     container.preferences.revocationPending,
                 permissionPromptKey = promptKey,
+                assignedLeads = if (snapshot.stage == OnboardingStage.READY) it.assignedLeads else emptyList(),
+                leadSummary = if (snapshot.stage == OnboardingStage.READY) it.leadSummary
+                else AssignedLeadSummary(0, 0, 0, 0),
+                leadsGeneratedAt = if (snapshot.stage == OnboardingStage.READY) it.leadsGeneratedAt else null,
+                leadsLoading = if (snapshot.stage == OnboardingStage.READY) it.leadsLoading else false,
+                leadsErrorCode = if (snapshot.stage == OnboardingStage.READY) it.leadsErrorCode else null,
             )
         }
-        if (snapshot.stage == OnboardingStage.READY) SyncScheduler.ensurePeriodic(getApplication())
+        if (snapshot.stage == OnboardingStage.READY) {
+            SyncScheduler.ensurePeriodic(getApplication())
+            if (state.value.section == ReadySection.LEADS && credentials != null &&
+                state.value.assignedLeads.isEmpty() && !state.value.leadsLoading
+            ) {
+                loadAssignedLeads(credentials)
+            }
+        }
+    }
+
+    private suspend fun loadAssignedLeads(credentials: DeviceCredentials) {
+        _state.update { it.copy(leadsLoading = true, leadsErrorCode = null) }
+        try {
+            val page = container.api.listAssignedLeads(credentials)
+            _state.update {
+                it.copy(
+                    assignedLeads = page.items,
+                    leadSummary = page.summary,
+                    leadsGeneratedAt = page.generatedAt,
+                    leadsLoading = false,
+                    leadsErrorCode = null,
+                )
+            }
+        } catch (error: Throwable) {
+            val code = (error as? MobileApiException)?.code ?: "LEADS_UNAVAILABLE"
+            SafeLog.warn("CalloraUi", "Assigned lead refresh failed: $code", error)
+            _state.update {
+                val mustClear = code == "UNAUTHENTICATED" || code == "CONSENT_REQUIRED"
+                it.copy(
+                    assignedLeads = if (mustClear) emptyList() else it.assignedLeads,
+                    leadSummary = if (mustClear) AssignedLeadSummary(0, 0, 0, 0) else it.leadSummary,
+                    leadsGeneratedAt = if (mustClear) null else it.leadsGeneratedAt,
+                    leadsLoading = false,
+                    leadsErrorCode = code,
+                )
+            }
+        }
     }
 
     private suspend fun readProtocolOrFailClosed(): MobileProtocolState = try {

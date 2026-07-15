@@ -6,12 +6,21 @@ import type {
   CallLog,
   CallLogSyncBatch,
   CallLogSyncResult,
+  CompleteFollowUpInput,
+  CreateFollowUpInput,
+  CreateLeadInput,
+  CreateLeadNoteInput,
   DevicePermissions,
   DeviceHeartbeat,
   EmployeeDevice,
   HeartbeatAcknowledgement,
   IsoDateTime,
   JsonValue,
+  LeadDetail,
+  LeadListItem,
+  LeadQueueKey,
+  LeadQueueSummary,
+  LeadStatus,
   OrganizationId,
   Permission,
   SystemRoleKey,
@@ -21,12 +30,19 @@ import type {
   MobileCollectionPolicy,
   MobilePolicyReference,
   MobileReconsentInput,
+  UpdateLeadRequest,
 } from "@callora/contracts";
 import type { DeviceCredentialType } from "./security.js";
 
 export interface ActorContext extends AuthenticatedActor {
   roleKey: SystemRoleKey;
+  leadScope: LeadAccessScope;
 }
+
+export type LeadAccessScope =
+  | { kind: "organization" }
+  | { kind: "teams"; teamNames: string[] }
+  | { kind: "assigned"; employeeId: string };
 
 export interface AuditEvent {
   id: string;
@@ -35,7 +51,7 @@ export interface AuditEvent {
   actorDeviceId?: string;
   requestId?: string;
   action: string;
-  entityType: "employee" | "device" | "pairing_code" | "call" | "session";
+  entityType: "employee" | "device" | "pairing_code" | "call" | "session" | "lead" | "follow_up";
   entityId: string;
   occurredAt: IsoDateTime;
   metadata: Record<string, JsonValue>;
@@ -96,6 +112,72 @@ export interface EmployeeCursor {
   displayName: string;
   id: string;
 }
+
+export interface LeadCursor {
+  createdAt: IsoDateTime;
+  id: string;
+}
+
+export interface LeadListFilter {
+  search?: string;
+  statusId?: string;
+  assignedEmployeeId?: string;
+  queue: LeadQueueKey;
+}
+
+export interface LeadListResult {
+  items: LeadListItem[];
+  summary: LeadQueueSummary;
+  hasMore: boolean;
+}
+
+export interface CreateLeadOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  input: CreateLeadInput;
+  actorUserId: string;
+  at: IsoDateTime;
+}
+
+export interface UpdateLeadOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  leadId: string;
+  request: UpdateLeadRequest;
+  actorUserId: string;
+  canAssign: boolean;
+  at: IsoDateTime;
+}
+
+export interface CreateLeadNoteOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  leadId: string;
+  input: CreateLeadNoteInput;
+  actorUserId: string;
+  at: IsoDateTime;
+}
+
+export interface CreateLeadFollowUpOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  leadId: string;
+  input: CreateFollowUpInput;
+  actorUserId: string;
+  at: IsoDateTime;
+}
+
+export interface CompleteLeadFollowUpOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  followUpId: string;
+  input: CompleteFollowUpInput;
+  actorUserId: string;
+  at: IsoDateTime;
+}
+
+export type LeadWorkspaceDetail = LeadDetail;
+export type LeadPipelineStatus = LeadStatus;
 
 export interface EmployeeListFilter {
   search?: string;
@@ -218,10 +300,10 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly Permissio
     "recordings.listen", "recordings.manage", "leads.read", "leads.manage", "leads.assign",
     "reports.read", "reports.export", "integrations.read", "integrations.manage", "audit.read",
   ],
-  // Team-scoped authorization is not implemented yet. Keep this role fail-closed
-  // so a future permission-only route cannot accidentally expose organization data.
-  manager: ["organization.read"],
+  // Organization-wide employee/call routes remain fail-closed; lead routes apply
+  // the manager's explicit membership_team_scopes inside the repository.
+  manager: ["organization.read", "employees.read", "calls.read", "leads.read", "leads.manage", "leads.assign"],
   analyst: ["organization.read", "employees.read", "calls.read", "reports.read", "reports.export"],
-  // Self-scoped authorization is not implemented yet; see the manager note above.
-  employee: ["organization.read"],
+  // Lead routes restrict this role to the linked employee assignment.
+  employee: ["organization.read", "leads.read", "leads.manage"],
 };

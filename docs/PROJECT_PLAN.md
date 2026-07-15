@@ -8,10 +8,10 @@
 ## Current execution status
 
 - Phase 1 and Phase 2 vertical slices are implemented and locally verified.
-- Phase 3A–3D are implemented locally: 13 migrations, 22 FORCE-RLS tenant tables, production OIDC/PostgreSQL adapters, authoritative mobile policy/consent, client-generated hash-only credentials, exact replay, audited administrator per-device recovery, encrypted phone/contact envelopes, versioned blind-index rotation, encrypted-only database finalization, and native Android demo/enterprise flavors.
-- The automated baseline is 177 passing API/web/database tests plus 8 release-preflight tests, 46 passing Android JVM tests, zero Android lint errors, schema verification, type checking, successful production/debug builds, and a clean scoped adversarial security review.
+- Phase 3A–3D and Phase 4A are implemented locally: 14 migrations, 29 FORCE-RLS tenant tables, production OIDC/PostgreSQL adapters, authoritative mobile policy/consent, encrypted call and lead phone envelopes, versioned blind indexes, tenant/team/assigned lead scopes, optimistic lead workflows, immutable CRM history, a responsive web lead pipeline, and native Android demo/enterprise lead workspaces.
+- The automated baseline is 219 passing API/web/database/release-preflight tests, 46 passing Android JVM tests, zero Android lint errors, schema verification, type checking, successful production/debug builds, responsive browser checks, and a focused local security review with no blocking findings.
 - The Phase 3E launch-evidence track remains external: real PostgreSQL 15 restored-clone migration/backfill/rotation/finalization/backup evidence, real OIDC/deployed-origin validation, production Android signing, legal/distribution approval, and the physical API/OEM/power matrix.
-- The next feature-development slice is Phase 4: lead CRM, import/assignment, call-to-lead timeline, and employee follow-up workflow. Phase 3E evidence should continue in parallel and remains a launch gate.
+- The next feature-development slice is Phase 4B: CSV import/deduplication, assignment rules, manual call-link correction surfaces, Android post-call mutations, and lead reports. Phase 3E evidence should continue in parallel and remains a launch gate.
 
 ## 1. Product intent
 
@@ -218,6 +218,12 @@ Acceptance criteria:
 - The selected distribution channel accepts the permission approach before public launch.
 
 ### Phase 4 — Lead CRM and employee workflow, 4–5 weeks
+
+Execution note (15 July 2026): Phase 4A is complete. It delivers the lead data
+model, scoped API, web pipeline/detail workflow, automatic call matching, and
+read-only assigned-lead Android experience with `ACTION_DIAL`. Import jobs,
+assignment rules, manual correction surfaces, Android post-call writes, and
+lead reporting are explicitly carried into Phase 4B.
 
 Goal: convert call information into owned sales/service follow-up work.
 

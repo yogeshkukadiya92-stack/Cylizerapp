@@ -18,6 +18,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
 class HttpMobileApi(
@@ -176,6 +177,69 @@ class HttpMobileApi(
                 )
             },
             serverTime = data.requireString("serverTime"),
+        )
+    }
+
+    override suspend fun listAssignedLeads(
+        credentials: DeviceCredentials,
+        queue: String,
+        search: String?,
+    ): AssignedLeadPage {
+        require(queue in setOf("all", "not_contacted", "overdue", "unreturned_calls")) {
+            "Unsupported lead queue"
+        }
+        val query = buildList {
+            add("limit=100")
+            add("queue=${URLEncoder.encode(queue, StandardCharsets.UTF_8.name())}")
+            search?.trim()?.takeIf(String::isNotBlank)?.let {
+                add("search=${URLEncoder.encode(it.take(160), StandardCharsets.UTF_8.name())}")
+            }
+        }.joinToString("&")
+        val data = request("GET", "${MobileRoutes.LEADS}?$query", null, credentials.sessionToken, null)
+        val itemsJson = data.getJSONArray("items")
+        val items = List(itemsJson.length()) { index ->
+            val item = itemsJson.getJSONObject(index)
+            val lead = item.requireObject("lead")
+            val status = item.requireObject("status")
+            val nextFollowUp = item.optJSONObject("nextFollowUp")
+            val firstName = lead.requireString("firstName")
+            val lastName = lead.optStringOrNull("lastName")
+            val companyName = lead.optStringOrNull("companyName")
+            AssignedLead(
+                id = lead.requireString("id"),
+                version = lead.requireLong("version"),
+                displayName = companyName ?: listOfNotNull(firstName, lastName).joinToString(" "),
+                firstName = firstName,
+                lastName = lastName,
+                companyName = companyName,
+                phoneNumber = lead.requireString("phoneNumber"),
+                email = lead.optStringOrNull("email"),
+                source = lead.requireString("source"),
+                statusId = status.requireString("id"),
+                statusName = status.requireString("name"),
+                statusColor = status.requireString("color"),
+                lastContactedAt = lead.optStringOrNull("lastContactedAt"),
+                nextFollowUpAt = nextFollowUp?.optStringOrNull("dueAt")
+                    ?: lead.optStringOrNull("nextFollowUpAt"),
+                nextFollowUpTitle = nextFollowUp?.optStringOrNull("title"),
+                overdueFollowUpCount = item.optInt("overdueFollowUpCount", 0),
+                unreturnedMissedCallCount = item.optInt("unreturnedMissedCallCount", 0),
+                createdAt = lead.requireString("createdAt"),
+                updatedAt = lead.requireString("updatedAt"),
+            )
+        }
+        val summary = data.requireObject("summary")
+        val cursor = data.requireObject("cursorInfo")
+        return AssignedLeadPage(
+            items = items,
+            summary = AssignedLeadSummary(
+                total = summary.optInt("total", 0),
+                notContacted = summary.optInt("notContacted", 0),
+                overdue = summary.optInt("overdue", 0),
+                unreturnedCalls = summary.optInt("unreturnedCalls", 0),
+            ),
+            generatedAt = data.requireString("generatedAt"),
+            nextCursor = cursor.optStringOrNull("nextCursor"),
         )
     }
 

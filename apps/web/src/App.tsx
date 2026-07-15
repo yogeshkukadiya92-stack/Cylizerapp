@@ -3,13 +3,12 @@ import { createRuntimeAuthSession } from './auth/factory'
 import type { AuthSession, AuthUserSummary } from './auth/types'
 import { useAuth } from './auth/useAuth'
 import type { AuthorizationFailure } from './auth/useAuth'
-import { AddEmployeeDialog } from './components/AddEmployeeDialog'
 import { AppShell } from './components/AppShell'
 import { AuthGate } from './components/AuthGate'
-import { DashboardPage } from './components/DashboardPage'
+import { DashboardWorkspace } from './components/DashboardWorkspace'
 import { ModulePreview } from './components/ModulePreview'
-import { useDashboardData } from './api/useDashboardData'
-import type { AttentionItem, DateRange, EmployeeRow } from './types'
+import { LeadsWorkspace } from './features/leads/LeadsWorkspace'
+import type { AppModule } from './navigation'
 
 interface DashboardApplicationProps {
   authSession: AuthSession
@@ -19,26 +18,10 @@ interface DashboardApplicationProps {
 }
 
 function DashboardApplication({ authSession, authUser, onAuthenticationFailure, onSignOut }: DashboardApplicationProps) {
-  const [activeModule, setActiveModule] = useState('Dashboard')
-  const [dateRange, setDateRange] = useState<DateRange>('Today')
-  const [employeeFilter, setEmployeeFilter] = useState('all')
+  const [activeModule, setActiveModule] = useState<AppModule>('Dashboard')
   const [searchQuery, setSearchQuery] = useState('')
   const [isSidebarOpen, setSidebarOpen] = useState(false)
-  const [isAddEmployeeOpen, setAddEmployeeOpen] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
-  const {
-    addEmployee: addEmployeeToDataSource,
-    canManageDevices,
-    dashboard,
-    dataSource,
-    employees,
-    revokeDevice: revokeDeviceFromDataSource,
-  } = useDashboardData(
-    dateRange,
-    employeeFilter,
-    authSession,
-    onAuthenticationFailure,
-  )
 
   useEffect(() => {
     if (!toast) return undefined
@@ -57,34 +40,9 @@ function DashboardApplication({ authSession, authUser, onAuthenticationFailure, 
     return () => window.removeEventListener('keydown', handleShortcut)
   }, [])
 
-  const addEmployee = async (employee: EmployeeRow): Promise<boolean> => {
-    try {
-      const result = await addEmployeeToDataSource(employee)
-      setToast(result.source === 'live'
-        ? `${employee.name} added to your team`
-        : `${employee.name} added as a local draft · not synced`)
-      return true
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Please try again.'
-      setToast(`Could not add ${employee.name}: ${detail}`)
-      return false
-    }
-  }
-
-  const selectAttentionItem = (item: AttentionItem) => {
-    setToast(`${item.value} ${item.label.toLowerCase()} queued for review`)
-  }
-
-  const revokeDevice = async (deviceId: string, reason: string): Promise<boolean> => {
-    try {
-      await revokeDeviceFromDataSource(deviceId, reason)
-      setToast('Device revoked, credentials disabled, and consent withdrawn')
-      return true
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Please try again.'
-      setToast(`Could not revoke device: ${detail}`)
-      return false
-    }
+  const changeModule = (module: AppModule) => {
+    setActiveModule(module)
+    setSearchQuery('')
   }
 
   return (
@@ -92,7 +50,7 @@ function DashboardApplication({ authSession, authUser, onAuthenticationFailure, 
       activeModule={activeModule}
       displayName={authUser.displayName}
       isSidebarOpen={isSidebarOpen}
-      onModuleChange={setActiveModule}
+      onModuleChange={changeModule}
       onSearchChange={setSearchQuery}
       onSignOut={authSession.mode === 'oidc' ? onSignOut : undefined}
       onSidebarClose={() => setSidebarOpen(false)}
@@ -100,28 +58,23 @@ function DashboardApplication({ authSession, authUser, onAuthenticationFailure, 
       searchQuery={searchQuery}
     >
       {activeModule === 'Dashboard' ? (
-        <DashboardPage
-          canManageDevices={canManageDevices}
-          dateRange={dateRange}
-          dashboard={dashboard}
-          dataSource={dataSource}
-          employeeFilter={employeeFilter}
-          employees={employees}
-          onAddEmployee={() => setAddEmployeeOpen(true)}
-          onAttentionSelect={selectAttentionItem}
-          onDateRangeChange={setDateRange}
-          onEmployeeFilterChange={setEmployeeFilter}
-          onRevokeDevice={revokeDevice}
+        <DashboardWorkspace
+          authSession={authSession}
+          onAuthenticationFailure={onAuthenticationFailure}
+          onNotify={setToast}
+          searchQuery={searchQuery}
+        />
+      ) : activeModule === 'Leads' ? (
+        <LeadsWorkspace
+          authSession={authSession}
+          onAuthenticationFailure={onAuthenticationFailure}
+          onNotify={setToast}
+          onSearchChange={setSearchQuery}
           searchQuery={searchQuery}
         />
       ) : (
         <ModulePreview module={activeModule} onBack={() => setActiveModule('Dashboard')} />
       )}
-      <AddEmployeeDialog
-        isOpen={isAddEmployeeOpen}
-        onAdd={addEmployee}
-        onClose={() => setAddEmployeeOpen(false)}
-      />
       {toast ? <div aria-live="polite" className="toast">{toast}</div> : null}
     </AppShell>
   )

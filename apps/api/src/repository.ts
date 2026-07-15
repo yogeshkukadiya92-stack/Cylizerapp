@@ -2,9 +2,19 @@ import { randomInt, randomUUID } from "node:crypto";
 import type {
   CallLogSyncResult,
   CallLog,
+  CompleteFollowUpInput,
   CreateEmployeeInput,
+  CreateLeadInput,
   Employee,
   EmployeeDevice,
+  FollowUp,
+  Lead,
+  LeadActivity,
+  LeadDetail,
+  LeadListItem,
+  LeadNote,
+  LeadQueueSummary,
+  LeadStatus,
   Organization,
   OrganizationId,
   Role,
@@ -20,6 +30,15 @@ import type {
   DeviceRegistration,
   EmployeeCursor,
   EmployeeListFilter,
+  LeadAccessScope,
+  LeadCursor,
+  LeadListFilter,
+  LeadListResult,
+  CreateLeadOptions,
+  UpdateLeadOptions,
+  CreateLeadNoteOptions,
+  CreateLeadFollowUpOptions,
+  CompleteLeadFollowUpOptions,
   IngestCallResult,
   MobileActivationPayload,
   MobileCallBatchOptions,
@@ -104,6 +123,26 @@ export interface CalloraRepository {
   findEmployee(organizationId: OrganizationId, employeeId: string): Promise<Employee | undefined>;
   createEmployee(organizationId: OrganizationId, input: CreateEmployeeInput, actorUserId: string, at: string): Promise<Employee>;
   suspendEmployee(organizationId: OrganizationId, employeeId: string, actorUserId: string, at: string): Promise<Employee | undefined>;
+  listLeadStatuses(organizationId: OrganizationId): Promise<LeadStatus[]>;
+  listLeads(options: {
+    organizationId: OrganizationId;
+    scope: LeadAccessScope;
+    filter: LeadListFilter;
+    after?: LeadCursor;
+    limit: number;
+    at: string;
+  }): Promise<LeadListResult>;
+  findLeadDetail(options: {
+    organizationId: OrganizationId;
+    scope: LeadAccessScope;
+    leadId: string;
+    at: string;
+  }): Promise<LeadDetail | undefined>;
+  createLead(options: CreateLeadOptions): Promise<LeadDetail | undefined>;
+  updateLead(options: UpdateLeadOptions): Promise<LeadDetail | undefined>;
+  createLeadNote(options: CreateLeadNoteOptions): Promise<LeadDetail | undefined>;
+  createLeadFollowUp(options: CreateLeadFollowUpOptions): Promise<LeadDetail | undefined>;
+  completeLeadFollowUp(options: CompleteLeadFollowUpOptions): Promise<LeadDetail | undefined>;
   findDevice(organizationId: OrganizationId, deviceId: string): Promise<EmployeeDevice | undefined>;
   revokeDeviceByAdministrator(options: {
     organizationId: OrganizationId;
@@ -248,6 +287,7 @@ function seededEmployee(
   status: Employee["status"],
   team: string,
   deviceIds: string[],
+  linkedUserId?: string,
 ): Employee {
   const timestamp = "2026-07-14T00:00:00.000Z";
   return {
@@ -259,6 +299,7 @@ function seededEmployee(
     team,
     status,
     deviceIds,
+    ...(linkedUserId === undefined ? {} : { linkedUserId }),
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -374,6 +415,13 @@ export class InMemoryCalloraRepository implements CalloraRepository {
   private readonly developmentActors = new Map<string, string>();
   private readonly externalIdentityUsers = new Map<string, string>();
   private readonly employees = new Map<string, Employee>();
+  private readonly leadStatuses = new Map<string, LeadStatus>();
+  private readonly leads = new Map<string, Lead>();
+  private readonly leadTeams = new Map<string, string>();
+  private readonly leadNotes = new Map<string, LeadNote>();
+  private readonly leadFollowUps = new Map<string, FollowUp>();
+  private readonly leadActivities = new Map<string, LeadActivity>();
+  private readonly leadIdByCallId = new Map<string, string>();
   private readonly devices = new Map<string, EmployeeDevice>();
   private readonly devicesByInstallation = new Map<string, string>();
   private readonly pairingCodesById = new Map<string, PairingCodeRecord>();
@@ -479,9 +527,9 @@ export class InMemoryCalloraRepository implements CalloraRepository {
     }
 
     const employees = [
-      seededEmployee("emp_alpha_amit", "org_alpha", "Amit Patel", "active", "Sales", ["device_alpha_amit"]),
-      seededEmployee("emp_alpha_priya", "org_alpha", "Priya Sharma", "invited", "Sales", []),
-      seededEmployee("emp_beta_riya", "org_beta", "Riya Mehta", "active", "Support", ["device_beta_riya"]),
+      seededEmployee("emp_alpha_amit", "org_alpha", "Amit Patel", "active", "Sales", ["device_alpha_amit"], "user_org_alpha_employee"),
+      seededEmployee("emp_alpha_priya", "org_alpha", "Priya Sharma", "invited", "Sales", [], "user_org_alpha_manager"),
+      seededEmployee("emp_beta_riya", "org_beta", "Riya Mehta", "active", "Support", ["device_beta_riya"], "user_org_beta_employee"),
     ];
     for (const employee of employees) {
       this.employees.set(employee.id, employee);
@@ -496,6 +544,103 @@ export class InMemoryCalloraRepository implements CalloraRepository {
       this.devicesByInstallation.set(`${device.organizationId}:${device.installationId}`, device.id);
       this.deviceCollectionModes.set(device.id, "android_call_log");
     }
+    this.seedLeadWorkspace();
+  }
+
+  private seedLeadWorkspace(): void {
+    const statusRows: LeadStatus[] = [
+      { id: "lead_status_alpha_new", organizationId: "org_alpha", name: "New", color: "#2f83ee", position: 1, isInitial: true, isWon: false, isLost: false, isActive: true },
+      { id: "lead_status_alpha_contacted", organizationId: "org_alpha", name: "Contacted", color: "#f3942b", position: 2, isInitial: false, isWon: false, isLost: false, isActive: true },
+      { id: "lead_status_alpha_qualified", organizationId: "org_alpha", name: "Qualified", color: "#0b9277", position: 3, isInitial: false, isWon: false, isLost: false, isActive: true },
+      { id: "lead_status_alpha_won", organizationId: "org_alpha", name: "Won", color: "#08755f", position: 4, isInitial: false, isWon: true, isLost: false, isActive: true },
+      { id: "lead_status_alpha_lost", organizationId: "org_alpha", name: "Lost", color: "#f35a46", position: 5, isInitial: false, isWon: false, isLost: true, isActive: true },
+      { id: "lead_status_beta_new", organizationId: "org_beta", name: "New", color: "#2f83ee", position: 1, isInitial: true, isWon: false, isLost: false, isActive: true },
+      { id: "lead_status_beta_contacted", organizationId: "org_beta", name: "Contacted", color: "#f3942b", position: 2, isInitial: false, isWon: false, isLost: false, isActive: true },
+    ];
+    statusRows.forEach((status) => this.leadStatuses.set(status.id, status));
+
+    const timestamp = "2026-07-14T10:25:00.000Z";
+    const leads: Lead[] = [
+      {
+        id: "lead_alpha_ramesh", organizationId: "org_alpha", firstName: "Ramesh",
+        companyName: "Ramesh Traders", phoneNumber: "+919876543210", source: "manual",
+        statusId: "lead_status_alpha_qualified", assignedEmployeeId: "emp_alpha_amit",
+        tagIds: [], customFields: {}, lastContactedAt: "2026-07-14T04:51:00.000Z",
+        nextFollowUpAt: "2026-07-14T11:00:00.000Z", version: 1,
+        createdAt: "2026-07-10T06:00:00.000Z", updatedAt: timestamp,
+      },
+      {
+        id: "lead_alpha_aarav", organizationId: "org_alpha", firstName: "Aarav", lastName: "Shah",
+        phoneNumber: "+919123456789", source: "website", statusId: "lead_status_alpha_new",
+        assignedEmployeeId: "emp_alpha_amit", tagIds: [], customFields: {},
+        nextFollowUpAt: "2026-07-15T05:30:00.000Z", version: 1,
+        createdAt: "2026-07-13T06:00:00.000Z", updatedAt: "2026-07-13T06:00:00.000Z",
+      },
+      {
+        id: "lead_alpha_shree", organizationId: "org_alpha", firstName: "Shree",
+        companyName: "Shree Enterprises", phoneNumber: "+918765432109", source: "integration",
+        statusId: "lead_status_alpha_contacted", assignedEmployeeId: "emp_alpha_amit",
+        tagIds: [], customFields: {}, lastContactedAt: "2026-07-13T10:15:00.000Z",
+        nextFollowUpAt: "2026-07-16T08:30:00.000Z", version: 1,
+        createdAt: "2026-07-11T05:30:00.000Z", updatedAt: "2026-07-13T10:15:00.000Z",
+      },
+      {
+        id: "lead_alpha_meera", organizationId: "org_alpha", firstName: "Meera",
+        companyName: "Meera Textiles", phoneNumber: "+919988766554", source: "manual",
+        statusId: "lead_status_alpha_won", assignedEmployeeId: "emp_alpha_amit",
+        tagIds: [], customFields: {}, lastContactedAt: "2026-07-09T07:40:00.000Z",
+        convertedAt: "2026-07-09T07:40:00.000Z", version: 1,
+        createdAt: "2026-07-02T04:30:00.000Z", updatedAt: "2026-07-09T07:40:00.000Z",
+      },
+      {
+        id: "lead_alpha_nisha", organizationId: "org_alpha", firstName: "Nisha", lastName: "Patel",
+        phoneNumber: "+919345678901", source: "manual", statusId: "lead_status_alpha_new",
+        assignedEmployeeId: "emp_alpha_amit", tagIds: [], customFields: {},
+        nextFollowUpAt: "2026-07-18T05:00:00.000Z", version: 1,
+        createdAt: "2026-07-14T05:20:00.000Z", updatedAt: "2026-07-14T05:20:00.000Z",
+      },
+      {
+        id: "lead_beta_private", organizationId: "org_beta", firstName: "Beta", companyName: "Beta Services",
+        phoneNumber: "+919900123456", source: "manual", statusId: "lead_status_beta_new",
+        assignedEmployeeId: "emp_beta_riya", tagIds: [], customFields: {}, version: 1,
+        createdAt: "2026-07-12T05:20:00.000Z", updatedAt: "2026-07-12T05:20:00.000Z",
+      },
+    ];
+    leads.forEach((lead) => {
+      this.leads.set(lead.id, lead);
+      const assigned = lead.assignedEmployeeId ? this.employees.get(lead.assignedEmployeeId) : undefined;
+      if (assigned?.team) this.leadTeams.set(lead.id, assigned.team);
+    });
+
+    const followUps: FollowUp[] = [
+      {
+        id: "followup_alpha_ramesh", organizationId: "org_alpha", leadId: "lead_alpha_ramesh",
+        assignedEmployeeId: "emp_alpha_amit", title: "Discuss annual order", dueAt: "2026-07-14T11:00:00.000Z",
+        priority: "high", status: "pending", version: 1,
+        createdAt: "2026-07-14T04:52:00.000Z", updatedAt: "2026-07-14T04:52:00.000Z",
+      },
+      {
+        id: "followup_alpha_aarav", organizationId: "org_alpha", leadId: "lead_alpha_aarav",
+        assignedEmployeeId: "emp_alpha_amit", title: "First contact", dueAt: "2026-07-15T05:30:00.000Z",
+        priority: "normal", status: "pending", version: 1,
+        createdAt: "2026-07-13T06:00:00.000Z", updatedAt: "2026-07-13T06:00:00.000Z",
+      },
+    ];
+    followUps.forEach((followUp) => this.leadFollowUps.set(followUp.id, followUp));
+
+    const note: LeadNote = {
+      id: "lead_note_alpha_ramesh", organizationId: "org_alpha", leadId: "lead_alpha_ramesh",
+      authorUserId: "user_org_alpha_owner", body: "Interested in our premium textile range.",
+      isPinned: false, createdAt: timestamp, updatedAt: timestamp,
+    };
+    this.leadNotes.set(note.id, note);
+    const activities: LeadActivity[] = [
+      { id: "lead_activity_alpha_1", organizationId: "org_alpha", leadId: "lead_alpha_ramesh", kind: "call_linked", occurredAt: "2026-07-14T04:51:00.000Z", summary: "Missed incoming call" },
+      { id: "lead_activity_alpha_2", organizationId: "org_alpha", leadId: "lead_alpha_ramesh", kind: "follow_up_created", actorUserId: "user_org_alpha_owner", occurredAt: "2026-07-14T04:52:00.000Z", summary: "Follow-up scheduled" },
+      { id: "lead_activity_alpha_3", organizationId: "org_alpha", leadId: "lead_alpha_ramesh", kind: "status_changed", actorUserId: "user_org_alpha_owner", occurredAt: "2026-07-14T04:53:00.000Z", summary: "Status changed to Qualified" },
+      { id: "lead_activity_alpha_4", organizationId: "org_alpha", leadId: "lead_alpha_ramesh", kind: "note_added", actorUserId: "user_org_alpha_owner", occurredAt: timestamp, summary: "Note added" },
+    ];
+    activities.forEach((activity) => this.leadActivities.set(activity.id, activity));
   }
 
   setReady(ready: boolean): void {
@@ -597,12 +742,20 @@ export class InMemoryCalloraRepository implements CalloraRepository {
     if (!primaryRole?.systemKey) {
       return undefined;
     }
+    const linkedEmployee = [...this.employees.values()].find((employee) =>
+      employee.organizationId === organizationId && employee.linkedUserId === user.id);
+    const leadScope: ActorContext["leadScope"] = primaryRole.systemKey === "manager"
+      ? { kind: "teams", teamNames: linkedEmployee?.team ? [linkedEmployee.team] : [] }
+      : primaryRole.systemKey === "employee"
+        ? { kind: "assigned", employeeId: linkedEmployee?.id ?? "" }
+        : { kind: "organization" };
     return clone({
       user,
       organization,
       roles,
       permissions: [...new Set(roles.flatMap((role) => role.permissions))],
       roleKey: primaryRole.systemKey,
+      leadScope,
     });
   }
 
@@ -702,6 +855,444 @@ export class InMemoryCalloraRepository implements CalloraRepository {
       }
     }
     return clone(employee);
+  }
+
+  private canAccessLead(scope: LeadAccessScope, lead: Lead): boolean {
+    if (scope.kind === "organization") return true;
+    if (scope.kind === "assigned") return Boolean(scope.employeeId) && lead.assignedEmployeeId === scope.employeeId;
+    if (scope.teamNames.length === 0) return false;
+    const team = this.leadTeams.get(lead.id) ??
+      (lead.assignedEmployeeId ? this.employees.get(lead.assignedEmployeeId)?.team : undefined);
+    return Boolean(team && scope.teamNames.includes(team));
+  }
+
+  private statusForLead(lead: Lead): LeadStatus {
+    const status = this.leadStatuses.get(lead.statusId);
+    if (!status || status.organizationId !== lead.organizationId) {
+      throw new Error("Lead status is missing or belongs to another organization");
+    }
+    return status;
+  }
+
+  private followUpsForLead(organizationId: OrganizationId, leadId: string): FollowUp[] {
+    return [...this.leadFollowUps.values()]
+      .filter((followUp) => followUp.organizationId === organizationId && followUp.leadId === leadId)
+      .sort((left, right) => left.dueAt.localeCompare(right.dueAt) || left.id.localeCompare(right.id));
+  }
+
+  private unreturnedMissedCallCount(lead: Lead): number {
+    const calls = [...this.leadActivities.values()].filter((activity) =>
+      activity.organizationId === lead.organizationId && activity.leadId === lead.id &&
+      activity.kind === "call_linked");
+    return calls.filter((activity) => {
+      const missed = activity.metadata?.direction === "incoming" && activity.metadata?.disposition === "missed" ||
+        activity.summary.toLocaleLowerCase().includes("missed");
+      if (!missed) return false;
+      return !calls.some((candidate) =>
+        candidate.occurredAt > activity.occurredAt &&
+        candidate.metadata?.direction === "outgoing" && candidate.metadata?.disposition === "answered");
+    }).length;
+  }
+
+  private linkCallToUniqueLead(call: CallLog, at: string): void {
+    if (call.participant.isInternal) return;
+    const employeeTeam = this.employees.get(call.employeeId)?.team;
+    if (!employeeTeam) return;
+    const existingLeadId = this.leadIdByCallId.get(call.id);
+    const candidates = existingLeadId
+      ? [this.leads.get(existingLeadId)].filter((lead): lead is Lead => lead !== undefined)
+      : [...this.leads.values()].filter((lead) =>
+        lead.organizationId === call.organizationId && !lead.archivedAt &&
+        this.leadTeams.get(lead.id) === employeeTeam &&
+        (lead.phoneNumber === call.participant.phoneNumber ||
+          lead.alternatePhoneNumber === call.participant.phoneNumber));
+    if (candidates.length !== 1) return;
+    const lead = candidates[0];
+    if (!lead) return;
+    if (call.disposition === "answered" &&
+      (lead.lastContactedAt === undefined || lead.lastContactedAt < call.startedAt)) {
+      lead.lastContactedAt = call.startedAt;
+      lead.updatedAt = at;
+      lead.version += 1;
+    }
+    if (existingLeadId) return;
+    this.leadIdByCallId.set(call.id, lead.id);
+    const activityId = this.ids.next("lead_activity");
+    this.leadActivities.set(activityId, {
+      id: activityId,
+      organizationId: call.organizationId,
+      leadId: lead.id,
+      kind: "call_linked",
+      callLogId: call.id,
+      occurredAt: call.startedAt,
+      summary: `${call.direction === "outgoing" ? "Outgoing" : "Incoming"} ${call.disposition} call linked`,
+      metadata: {
+        direction: call.direction,
+        disposition: call.disposition,
+        linkSource: "automatic",
+        matchConfidence: 1,
+      },
+    });
+  }
+
+  private buildLeadListItem(lead: Lead, at: string): LeadListItem {
+    const followUps = this.followUpsForLead(lead.organizationId, lead.id);
+    const pending = followUps.filter((followUp) => followUp.status === "pending");
+    const assignedEmployee = lead.assignedEmployeeId
+      ? this.employees.get(lead.assignedEmployeeId)
+      : undefined;
+    return {
+      lead: clone(lead),
+      status: clone(this.statusForLead(lead)),
+      ...(assignedEmployee === undefined ? {} : {
+        assignedEmployee: {
+          id: assignedEmployee.id,
+          displayName: assignedEmployee.displayName,
+          ...(assignedEmployee.team === undefined ? {} : { team: assignedEmployee.team }),
+        },
+      }),
+      ...(pending[0] === undefined ? {} : { nextFollowUp: clone(pending[0]) }),
+      overdueFollowUpCount: pending.filter((followUp) => followUp.dueAt < at).length,
+      unreturnedMissedCallCount: this.unreturnedMissedCallCount(lead),
+    };
+  }
+
+  private buildLeadDetail(lead: Lead, at: string): LeadDetail {
+    const notes = [...this.leadNotes.values()]
+      .filter((note) => note.organizationId === lead.organizationId && note.leadId === lead.id)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
+    const activities = [...this.leadActivities.values()]
+      .filter((activity) => activity.organizationId === lead.organizationId && activity.leadId === lead.id)
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt) || right.id.localeCompare(left.id));
+    return {
+      item: this.buildLeadListItem(lead, at),
+      notes: clone(notes),
+      followUps: clone(this.followUpsForLead(lead.organizationId, lead.id)),
+      activities: clone(activities),
+    };
+  }
+
+  private defaultLeadStatus(organizationId: OrganizationId): LeadStatus | undefined {
+    return [...this.leadStatuses.values()]
+      .filter((status) => status.organizationId === organizationId && status.isActive)
+      .sort((left, right) => Number(right.isInitial) - Number(left.isInitial) || left.position - right.position)[0];
+  }
+
+  private validateLeadAssignment(
+    organizationId: OrganizationId,
+    scope: LeadAccessScope,
+    employeeId: string,
+  ): Employee | undefined {
+    const employee = this.employees.get(employeeId);
+    if (!employee || employee.organizationId !== organizationId || employee.status !== "active") return undefined;
+    if (scope.kind === "organization") return employee;
+    if (scope.kind === "assigned") return scope.employeeId === employee.id ? employee : undefined;
+    return employee.team && scope.teamNames.includes(employee.team) ? employee : undefined;
+  }
+
+  async listLeadStatuses(organizationId: OrganizationId): Promise<LeadStatus[]> {
+    return clone([...this.leadStatuses.values()]
+      .filter((status) => status.organizationId === organizationId && status.isActive)
+      .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id)));
+  }
+
+  async listLeads(options: {
+    organizationId: OrganizationId;
+    scope: LeadAccessScope;
+    filter: LeadListFilter;
+    after?: LeadCursor;
+    limit: number;
+    at: string;
+  }): Promise<LeadListResult> {
+    const search = options.filter.search?.trim().toLocaleLowerCase();
+    let accessible = [...this.leads.values()].filter((lead) =>
+      lead.organizationId === options.organizationId && !lead.archivedAt && this.canAccessLead(options.scope, lead));
+    const queueMatches = (lead: Lead): boolean => {
+      const item = this.buildLeadListItem(lead, options.at);
+      if (options.filter.queue === "not_contacted") return lead.lastContactedAt === undefined;
+      if (options.filter.queue === "overdue") return item.overdueFollowUpCount > 0;
+      if (options.filter.queue === "unreturned_calls") return item.unreturnedMissedCallCount > 0;
+      return true;
+    };
+    const summary: LeadQueueSummary = {
+      total: accessible.length,
+      notContacted: accessible.filter((lead) => lead.lastContactedAt === undefined).length,
+      overdue: accessible.filter((lead) => this.buildLeadListItem(lead, options.at).overdueFollowUpCount > 0).length,
+      unreturnedCalls: accessible.filter((lead) => this.unreturnedMissedCallCount(lead) > 0).length,
+    };
+    accessible = accessible.filter((lead) => {
+      if (options.filter.statusId && lead.statusId !== options.filter.statusId) return false;
+      if (options.filter.assignedEmployeeId && lead.assignedEmployeeId !== options.filter.assignedEmployeeId) return false;
+      if (!queueMatches(lead)) return false;
+      if (search) {
+        const text = `${lead.firstName} ${lead.lastName ?? ""} ${lead.companyName ?? ""} ${lead.phoneNumber} ${lead.email ?? ""}`.toLocaleLowerCase();
+        if (!text.includes(search)) return false;
+      }
+      return true;
+    });
+    accessible.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
+    if (options.after) {
+      accessible = accessible.filter((lead) =>
+        lead.createdAt < options.after!.createdAt ||
+        (lead.createdAt === options.after!.createdAt && lead.id < options.after!.id));
+    }
+    const page = accessible.slice(0, options.limit + 1);
+    return {
+      items: page.slice(0, options.limit).map((lead) => this.buildLeadListItem(lead, options.at)),
+      summary,
+      hasMore: page.length > options.limit,
+    };
+  }
+
+  async findLeadDetail(options: {
+    organizationId: OrganizationId;
+    scope: LeadAccessScope;
+    leadId: string;
+    at: string;
+  }): Promise<LeadDetail | undefined> {
+    const lead = this.leads.get(options.leadId);
+    if (!lead || lead.organizationId !== options.organizationId || !this.canAccessLead(options.scope, lead)) return undefined;
+    return clone(this.buildLeadDetail(lead, options.at));
+  }
+
+  async createLead(options: CreateLeadOptions): Promise<LeadDetail | undefined> {
+    const status = options.input.statusId
+      ? this.leadStatuses.get(options.input.statusId)
+      : this.defaultLeadStatus(options.organizationId);
+    if (!status || status.organizationId !== options.organizationId || !status.isActive) return undefined;
+    if (options.input.assignedEmployeeId &&
+      !this.validateLeadAssignment(options.organizationId, options.scope, options.input.assignedEmployeeId)) return undefined;
+    if (options.scope.kind === "assigned" && options.input.assignedEmployeeId !== options.scope.employeeId) return undefined;
+    const lead: Lead = {
+      id: this.ids.next("lead"),
+      organizationId: options.organizationId,
+      firstName: options.input.firstName,
+      phoneNumber: options.input.phoneNumber,
+      source: options.input.source ?? "manual",
+      statusId: status.id,
+      tagIds: clone(options.input.tagIds ?? []),
+      customFields: clone(options.input.customFields ?? {}),
+      version: 1,
+      createdAt: options.at,
+      updatedAt: options.at,
+      createdBy: options.actorUserId,
+      updatedBy: options.actorUserId,
+      ...(options.input.lastName === undefined ? {} : { lastName: options.input.lastName }),
+      ...(options.input.companyName === undefined ? {} : { companyName: options.input.companyName }),
+      ...(options.input.alternatePhoneNumber === undefined ? {} : { alternatePhoneNumber: options.input.alternatePhoneNumber }),
+      ...(options.input.email === undefined ? {} : { email: options.input.email }),
+      ...(options.input.sourceReference === undefined ? {} : { sourceReference: options.input.sourceReference }),
+      ...(options.input.temperature === undefined ? {} : { temperature: options.input.temperature }),
+      ...(options.input.assignedEmployeeId === undefined ? {} : { assignedEmployeeId: options.input.assignedEmployeeId }),
+    };
+    this.leads.set(lead.id, lead);
+    const assigned = lead.assignedEmployeeId ? this.employees.get(lead.assignedEmployeeId) : undefined;
+    const team = assigned?.team ?? (options.scope.kind === "teams"
+      ? options.scope.teamNames[0]
+      : [...this.employees.values()].find((employee) =>
+        employee.organizationId === options.organizationId && employee.team)?.team);
+    if (team) this.leadTeams.set(lead.id, team);
+    const activityId = this.ids.next("lead_activity");
+    this.leadActivities.set(activityId, {
+      id: activityId,
+      organizationId: options.organizationId,
+      leadId: lead.id,
+      kind: "created",
+      actorUserId: options.actorUserId,
+      occurredAt: options.at,
+      summary: "Lead created",
+    });
+    return clone(this.buildLeadDetail(lead, options.at));
+  }
+
+  async updateLead(options: UpdateLeadOptions): Promise<LeadDetail | undefined> {
+    const lead = this.leads.get(options.leadId);
+    if (!lead || lead.organizationId !== options.organizationId || !this.canAccessLead(options.scope, lead)) return undefined;
+    if (lead.version !== options.request.expectedVersion) throw conflict("The lead changed; refresh and retry");
+    const changes = options.request.changes;
+    if (changes.statusId !== undefined) {
+      const status = this.leadStatuses.get(changes.statusId);
+      if (!status || status.organizationId !== options.organizationId || !status.isActive) return undefined;
+    }
+    if (changes.assignedEmployeeId !== undefined) {
+      if (!options.canAssign) return undefined;
+      if (changes.assignedEmployeeId !== null &&
+        !this.validateLeadAssignment(options.organizationId, options.scope, changes.assignedEmployeeId)) return undefined;
+    }
+    const oldStatusId = lead.statusId;
+    const oldAssignee = lead.assignedEmployeeId;
+    const setOptional = <Key extends keyof Lead>(key: Key, value: Lead[Key] | null | undefined): void => {
+      if (value === undefined) return;
+      if (value === null) delete lead[key];
+      else lead[key] = value;
+    };
+    if (changes.firstName !== undefined) lead.firstName = changes.firstName;
+    if (changes.phoneNumber !== undefined) lead.phoneNumber = changes.phoneNumber;
+    if (changes.statusId !== undefined) lead.statusId = changes.statusId;
+    if (changes.tagIds !== undefined) lead.tagIds = clone(changes.tagIds);
+    if (changes.customFields !== undefined) lead.customFields = clone(changes.customFields);
+    setOptional("lastName", changes.lastName);
+    setOptional("companyName", changes.companyName);
+    setOptional("alternatePhoneNumber", changes.alternatePhoneNumber);
+    setOptional("email", changes.email);
+    setOptional("temperature", changes.temperature);
+    setOptional("assignedEmployeeId", changes.assignedEmployeeId);
+    if (changes.assignedEmployeeId) {
+      const team = this.employees.get(changes.assignedEmployeeId)?.team;
+      if (team) this.leadTeams.set(lead.id, team);
+    }
+    if (changes.archived === true) lead.archivedAt = options.at;
+    if (changes.archived === false) delete lead.archivedAt;
+    const newStatus = this.statusForLead(lead);
+    if (newStatus.isWon && !lead.convertedAt) lead.convertedAt = options.at;
+    if (newStatus.isLost && !lead.lostAt) lead.lostAt = options.at;
+    lead.version += 1;
+    lead.updatedAt = options.at;
+    lead.updatedBy = options.actorUserId;
+    const activityKind: LeadActivity["kind"] = oldStatusId !== lead.statusId
+      ? "status_changed"
+      : oldAssignee !== lead.assignedEmployeeId
+        ? lead.assignedEmployeeId ? "assigned" : "unassigned"
+        : "updated";
+    const summary = activityKind === "status_changed"
+      ? `Status changed to ${newStatus.name}`
+      : activityKind === "assigned" ? "Lead assigned" : activityKind === "unassigned" ? "Lead unassigned" : "Lead updated";
+    const activityId = this.ids.next("lead_activity");
+    this.leadActivities.set(activityId, {
+      id: activityId,
+      organizationId: options.organizationId,
+      leadId: lead.id,
+      kind: activityKind,
+      actorUserId: options.actorUserId,
+      occurredAt: options.at,
+      summary,
+      metadata: {
+        oldStatusId: oldStatusId,
+        newStatusId: lead.statusId,
+        oldAssignedEmployeeId: oldAssignee ?? null,
+        newAssignedEmployeeId: lead.assignedEmployeeId ?? null,
+      },
+    });
+    return clone(this.buildLeadDetail(lead, options.at));
+  }
+
+  async createLeadNote(options: CreateLeadNoteOptions): Promise<LeadDetail | undefined> {
+    const lead = this.leads.get(options.leadId);
+    if (!lead || lead.organizationId !== options.organizationId || !this.canAccessLead(options.scope, lead)) return undefined;
+    const noteId = this.ids.next("lead_note");
+    this.leadNotes.set(noteId, {
+      id: noteId,
+      organizationId: options.organizationId,
+      leadId: lead.id,
+      authorUserId: options.actorUserId,
+      body: options.input.body,
+      isPinned: options.input.isPinned ?? false,
+      createdAt: options.at,
+      updatedAt: options.at,
+      createdBy: options.actorUserId,
+      updatedBy: options.actorUserId,
+    });
+    const activityId = this.ids.next("lead_activity");
+    this.leadActivities.set(activityId, {
+      id: activityId,
+      organizationId: options.organizationId,
+      leadId: lead.id,
+      kind: "note_added",
+      actorUserId: options.actorUserId,
+      occurredAt: options.at,
+      summary: "Note added",
+    });
+    return clone(this.buildLeadDetail(lead, options.at));
+  }
+
+  async createLeadFollowUp(options: CreateLeadFollowUpOptions): Promise<LeadDetail | undefined> {
+    const lead = this.leads.get(options.leadId);
+    if (!lead || lead.organizationId !== options.organizationId || !this.canAccessLead(options.scope, lead) ||
+      options.input.leadId !== lead.id ||
+      !this.validateLeadAssignment(options.organizationId, options.scope, options.input.assignedEmployeeId)) return undefined;
+    const followUpId = this.ids.next("follow_up");
+    this.leadFollowUps.set(followUpId, {
+      id: followUpId,
+      organizationId: options.organizationId,
+      leadId: lead.id,
+      assignedEmployeeId: options.input.assignedEmployeeId,
+      title: options.input.title,
+      dueAt: options.input.dueAt,
+      priority: options.input.priority ?? "normal",
+      status: "pending",
+      version: 1,
+      createdAt: options.at,
+      updatedAt: options.at,
+      createdBy: options.actorUserId,
+      updatedBy: options.actorUserId,
+      ...(options.input.notes === undefined ? {} : { notes: options.input.notes }),
+      ...(options.input.reminderAt === undefined ? {} : { reminderAt: options.input.reminderAt }),
+    });
+    const nextDue = this.followUpsForLead(options.organizationId, lead.id)
+      .find((followUp) => followUp.status === "pending")?.dueAt;
+    if (nextDue) lead.nextFollowUpAt = nextDue;
+    lead.updatedAt = options.at;
+    lead.updatedBy = options.actorUserId;
+    lead.version += 1;
+    const activityId = this.ids.next("lead_activity");
+    this.leadActivities.set(activityId, {
+      id: activityId,
+      organizationId: options.organizationId,
+      leadId: lead.id,
+      kind: "follow_up_created",
+      actorUserId: options.actorUserId,
+      occurredAt: options.at,
+      summary: "Follow-up scheduled",
+    });
+    return clone(this.buildLeadDetail(lead, options.at));
+  }
+
+  async completeLeadFollowUp(options: CompleteLeadFollowUpOptions): Promise<LeadDetail | undefined> {
+    const followUp = this.leadFollowUps.get(options.followUpId);
+    if (!followUp || followUp.organizationId !== options.organizationId) return undefined;
+    const lead = this.leads.get(followUp.leadId);
+    if (!lead || !this.canAccessLead(options.scope, lead)) return undefined;
+    if (followUp.version !== options.input.expectedVersion) throw conflict("The follow-up changed; refresh and retry");
+    if (followUp.status !== "pending") throw conflict("The follow-up is no longer pending");
+    followUp.status = "completed";
+    followUp.completedAt = options.input.completedAt ?? options.at;
+    followUp.completedByUserId = options.actorUserId;
+    followUp.updatedAt = options.at;
+    followUp.updatedBy = options.actorUserId;
+    followUp.version += 1;
+    if (options.input.completionNote) {
+      const noteId = this.ids.next("lead_note");
+      this.leadNotes.set(noteId, {
+        id: noteId,
+        organizationId: options.organizationId,
+        leadId: lead.id,
+        authorUserId: options.actorUserId,
+        body: options.input.completionNote,
+        isPinned: false,
+        createdAt: options.at,
+        updatedAt: options.at,
+        createdBy: options.actorUserId,
+        updatedBy: options.actorUserId,
+      });
+    }
+    const nextDue = this.followUpsForLead(options.organizationId, lead.id)
+      .find((candidate) => candidate.status === "pending")?.dueAt;
+    if (nextDue) lead.nextFollowUpAt = nextDue;
+    else delete lead.nextFollowUpAt;
+    lead.updatedAt = options.at;
+    lead.updatedBy = options.actorUserId;
+    lead.version += 1;
+    const activityId = this.ids.next("lead_activity");
+    this.leadActivities.set(activityId, {
+      id: activityId,
+      organizationId: options.organizationId,
+      leadId: lead.id,
+      kind: "follow_up_completed",
+      actorUserId: options.actorUserId,
+      occurredAt: options.at,
+      summary: "Follow-up completed",
+    });
+    return clone(this.buildLeadDetail(lead, options.at));
   }
 
   async findDevice(organizationId: OrganizationId, deviceId: string): Promise<EmployeeDevice | undefined> {
@@ -1360,6 +1951,7 @@ export class InMemoryCalloraRepository implements CalloraRepository {
         if (item.ringDurationSeconds === undefined) delete call.ringDurationSeconds;
         else call.ringDurationSeconds = item.ringDurationSeconds;
         this.callFingerprintByExternalId.set(externalKey, itemFingerprint);
+        this.linkCallToUniqueLead(call, options.at);
         results.push({ localId: item.localId, outcome: "updated", callLogId: call.id });
         continue;
       }
@@ -1394,6 +1986,7 @@ export class InMemoryCalloraRepository implements CalloraRepository {
       this.calls.set(call.id, call);
       this.callIdByExternalId.set(externalKey, call.id);
       this.callFingerprintByExternalId.set(externalKey, itemFingerprint);
+      this.linkCallToUniqueLead(call, options.at);
       results.push({ localId: item.localId, outcome: "created", callLogId: call.id });
     }
 
@@ -1522,6 +2115,7 @@ export class InMemoryCalloraRepository implements CalloraRepository {
     this.callIdByExternalId.set(externalMapKey, call.id);
     this.callFingerprintByExternalId.set(externalMapKey, options.fingerprint);
     this.idempotency.set(idempotencyMapKey, { fingerprint: options.fingerprint, callId: call.id });
+    this.linkCallToUniqueLead(call, options.at);
     return { call: clone(call), duplicate: false, conflict: false };
   }
 

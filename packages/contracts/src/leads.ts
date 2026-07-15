@@ -30,16 +30,22 @@ export type LeadSource =
   | "unknown";
 export type FollowUpStatus = "pending" | "completed" | "cancelled" | "overdue";
 export type FollowUpPriority = "low" | "normal" | "high" | "urgent";
+export type LeadQueueKey = "all" | "not_contacted" | "overdue" | "unreturned_calls";
 export type LeadActivityKind =
   | "created"
+  | "updated"
   | "assigned"
+  | "unassigned"
   | "status_changed"
+  | "custom_fields_changed"
   | "tag_added"
   | "tag_removed"
   | "note_added"
   | "call_linked"
+  | "call_unlinked"
   | "follow_up_created"
-  | "follow_up_completed";
+  | "follow_up_completed"
+  | "follow_up_cancelled";
 
 export interface LeadStatus {
   id: LeadStatusId;
@@ -95,6 +101,8 @@ export interface Lead extends AuditFields {
   convertedAt?: IsoDateTime;
   lostAt?: IsoDateTime;
   archivedAt?: IsoDateTime;
+  /** Compare-and-swap revision. Every successful mutation increments it once. */
+  version: number;
 }
 
 export interface LeadNote extends AuditFields {
@@ -119,6 +127,8 @@ export interface FollowUp extends AuditFields {
   status: FollowUpStatus;
   completedAt?: IsoDateTime;
   completedByUserId?: UserId;
+  /** Compare-and-swap revision. Every successful mutation increments it once. */
+  version: number;
 }
 
 export interface LeadActivity {
@@ -165,6 +175,16 @@ export interface UpdateLeadInput {
   archived?: boolean;
 }
 
+export interface UpdateLeadRequest {
+  expectedVersion: number;
+  changes: UpdateLeadInput;
+}
+
+export interface CreateLeadNoteInput {
+  body: string;
+  isPinned?: boolean;
+}
+
 export interface CreateFollowUpInput {
   leadId: LeadId;
   assignedEmployeeId: EmployeeId;
@@ -176,8 +196,38 @@ export interface CreateFollowUpInput {
 }
 
 export interface CompleteFollowUpInput {
+  expectedVersion: number;
   completionNote?: string;
   completedAt?: IsoDateTime;
+}
+
+export interface LeadOwnerSummary {
+  id: EmployeeId;
+  displayName: string;
+  team?: string;
+}
+
+export interface LeadListItem {
+  lead: Lead;
+  status: LeadStatus;
+  assignedEmployee?: LeadOwnerSummary;
+  nextFollowUp?: FollowUp;
+  overdueFollowUpCount: number;
+  unreturnedMissedCallCount: number;
+}
+
+export interface LeadQueueSummary {
+  total: number;
+  notContacted: number;
+  overdue: number;
+  unreturnedCalls: number;
+}
+
+export interface LeadDetail {
+  item: LeadListItem;
+  notes: LeadNote[];
+  followUps: FollowUp[];
+  activities: LeadActivity[];
 }
 
 export interface LeadImportRow {
@@ -209,12 +259,61 @@ export function isLeadSource(value: unknown): value is LeadSource {
   ].includes(value as LeadSource);
 }
 
+export function isLeadQueueKey(value: unknown): value is LeadQueueKey {
+  return ["all", "not_contacted", "overdue", "unreturned_calls"].includes(value as LeadQueueKey);
+}
+
+export function isFollowUpPriority(value: unknown): value is FollowUpPriority {
+  return ["low", "normal", "high", "urgent"].includes(value as FollowUpPriority);
+}
+
+export function isCreateLeadInput(value: unknown): value is CreateLeadInput {
+  if (!isRecord(value) || !isNonEmptyString(value.firstName) ||
+    !isNonEmptyString(value.phoneNumber) || !/^\+[1-9]\d{7,14}$/.test(value.phoneNumber)) {
+    return false;
+  }
+  if (value.source !== undefined && !isLeadSource(value.source)) return false;
+  if (value.email !== undefined &&
+    (!isNonEmptyString(value.email) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.email))) return false;
+  if (value.assignedEmployeeId !== undefined && !isNonEmptyString(value.assignedEmployeeId)) return false;
+  if (value.statusId !== undefined && !isNonEmptyString(value.statusId)) return false;
+  return value.tagIds === undefined ||
+    (Array.isArray(value.tagIds) && value.tagIds.every(isNonEmptyString));
+}
+
+export function isUpdateLeadRequest(value: unknown): value is UpdateLeadRequest {
+  if (!isRecord(value) || !Number.isSafeInteger(value.expectedVersion) ||
+    (value.expectedVersion as number) < 1 || !isRecord(value.changes)) return false;
+  const changes = value.changes;
+  if (Object.keys(changes).length === 0) return false;
+  if (changes.phoneNumber !== undefined &&
+    (!isNonEmptyString(changes.phoneNumber) || !/^\+[1-9]\d{7,14}$/.test(changes.phoneNumber))) return false;
+  if (changes.email !== undefined && changes.email !== null &&
+    (!isNonEmptyString(changes.email) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(changes.email))) return false;
+  if (changes.assignedEmployeeId !== undefined && changes.assignedEmployeeId !== null &&
+    !isNonEmptyString(changes.assignedEmployeeId)) return false;
+  return true;
+}
+
+export function isCreateLeadNoteInput(value: unknown): value is CreateLeadNoteInput {
+  return isRecord(value) && isNonEmptyString(value.body) &&
+    (value.isPinned === undefined || typeof value.isPinned === "boolean");
+}
+
 export function isCreateFollowUpInput(value: unknown): value is CreateFollowUpInput {
   return (
     isRecord(value) &&
     isNonEmptyString(value.leadId) &&
     isNonEmptyString(value.assignedEmployeeId) &&
     isNonEmptyString(value.title) &&
-    isIsoDateTime(value.dueAt)
+    isIsoDateTime(value.dueAt) &&
+    (value.priority === undefined || isFollowUpPriority(value.priority))
   );
+}
+
+export function isCompleteFollowUpInput(value: unknown): value is CompleteFollowUpInput {
+  return isRecord(value) && Number.isSafeInteger(value.expectedVersion) &&
+    (value.expectedVersion as number) >= 1 &&
+    (value.completedAt === undefined || isIsoDateTime(value.completedAt)) &&
+    (value.completionNote === undefined || isNonEmptyString(value.completionNote));
 }
