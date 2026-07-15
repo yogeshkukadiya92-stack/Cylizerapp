@@ -3,20 +3,21 @@ import {
   CalendarCheck2,
   CalendarPlus,
   Check,
+  History,
   NotebookPen,
   Phone,
-  PhoneMissed,
-  Tag,
-  UserRoundCheck,
   X,
 } from 'lucide-react'
 import { formatLeadDate, formatLeadPhone } from './formatters'
+import { LeadActivityDialog } from './LeadActivityDialog'
 import { LeadStatusBadge } from './LeadStatusBadge'
+import { LeadTimeline } from './LeadTimeline'
 import type {
   LeadDetailView,
   LeadOwnerOption,
   LeadPermissions,
   LeadStatusOption,
+  LeadTimelineItem,
   LeadUpdateRequest,
 } from './types'
 
@@ -31,17 +32,10 @@ interface LeadDetailPanelProps {
   timeZone: string
   onAddNote: () => void
   onClose: () => void
+  onCorrectCallLink: (item: LeadTimelineItem) => void
   onCompleteFollowUp: (followUpId: string) => Promise<boolean>
   onScheduleFollowUp: () => void
   onUpdate: (leadId: string, input: LeadUpdateRequest) => Promise<boolean>
-}
-
-function TimelineIcon({ kind }: { kind: LeadDetailView['timeline'][number]['kind'] }) {
-  if (kind === 'missed_call') return <PhoneMissed size={17} />
-  if (kind === 'follow_up_created' || kind === 'follow_up_completed') return <CalendarCheck2 size={17} />
-  if (kind === 'status_changed') return <Tag size={17} />
-  if (kind === 'note_added') return <NotebookPen size={17} />
-  return <UserRoundCheck size={17} />
 }
 
 export function LeadDetailPanel({
@@ -55,12 +49,14 @@ export function LeadDetailPanel({
   timeZone,
   onAddNote,
   onClose,
+  onCorrectCallLink,
   onCompleteFollowUp,
   onScheduleFollowUp,
   onUpdate,
 }: LeadDetailPanelProps) {
   const [isUpdating, setUpdating] = useState(false)
   const [completingFollowUpId, setCompletingFollowUpId] = useState<string | null>(null)
+  const [isActivityOpen, setActivityOpen] = useState(false)
 
   if (!detail) {
     return (
@@ -94,6 +90,7 @@ export function LeadDetailPanel({
   }
 
   return (
+    <>
     <aside aria-labelledby="lead-detail-heading" className="lead-detail-panel">
       <div aria-hidden="true" className="lead-sheet-handle" />
       <header className="lead-detail-header">
@@ -156,24 +153,10 @@ export function LeadDetailPanel({
           <span className="lead-action-label lead-action-label--desktop">Schedule follow-up</span>
           <span className="lead-action-label lead-action-label--mobile">Follow-up</span>
         </button>
+        <button className="lead-mobile-activity-button" onClick={() => setActivityOpen(true)} type="button"><History size={17} />Activity</button>
       </div>
 
-      <div className="lead-timeline" role="list">
-        {detail.timeline.length > 0 ? [...detail.timeline].sort((left, right) => (
-          new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime()
-        )).map((item) => (
-          <div className={`lead-timeline-item lead-timeline-item--${item.kind}`} key={item.id} role="listitem">
-            <span className="lead-timeline-icon"><TimelineIcon kind={item.kind} /></span>
-            <div>
-              <strong>{item.summary}</strong>
-              {item.detail ? <p>“{item.detail}”</p> : null}
-              <time dateTime={item.occurredAt}>{formatLeadDate(item.occurredAt, referenceAt, timeZone)}</time>
-              {item.isLocalDraft ? <small>Local draft</small> : null}
-            </div>
-            <span className="lead-timeline-actor">by {item.actorName ?? 'System'}</span>
-          </div>
-        )) : <div className="compact-empty">No timeline activity yet.</div>}
-      </div>
+      <LeadTimeline canCorrectCallLinks={permissions.canCorrectCallLinks} items={detail.timeline} onCorrectCallLink={onCorrectCallLink} referenceAt={referenceAt} timeZone={timeZone} />
 
       <section className="lead-next-action">
         <span>Next follow-up</span>
@@ -205,5 +188,20 @@ export function LeadDetailPanel({
         )}
       </section>
     </aside>
+    {isActivityOpen ? (
+      <LeadActivityDialog
+        canCorrectCallLinks={permissions.canCorrectCallLinks}
+        items={detail.timeline}
+        leadName={lead.displayName}
+        onClose={() => setActivityOpen(false)}
+        onCorrectCallLink={(item) => {
+          setActivityOpen(false)
+          onCorrectCallLink(item)
+        }}
+        referenceAt={referenceAt}
+        timeZone={timeZone}
+      />
+    ) : null}
+    </>
   )
 }

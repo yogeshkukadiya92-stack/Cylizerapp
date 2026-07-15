@@ -4,6 +4,8 @@ Native Android companion for the Callora dashboard. The underlying Phase 3C foun
 
 Phase 4A also adds a session-authenticated, employee-scoped Leads workspace. The enrolled employee can search assigned leads, switch between not-contacted/overdue/unreturned queues, review the next follow-up in a bottom sheet, refresh from the server, and launch Android's system dialer. Lead data stays in memory only, is cleared whenever onboarding leaves `READY`, and is never exposed across device re-enrollment. The dial action uses `ACTION_DIAL`; the app does not request `CALL_PHONE`.
 
+Phase 4B adds assigned-lead writeback without weakening that boundary. An employee can update status, add a call note, and schedule a follow-up from lead detail or from the optional return prompt shown after the Phone app. Opening the dialer never counts as proof that a call occurred. Each submitted update becomes one immutable composite command with a UUID request ID, is AES-GCM encrypted before Room persistence, and reuses that UUID as `Idempotency-Key` until the server acknowledges or rejects it. Only one unresolved command is allowed per lead, conflicts stay visible for manual refresh, and every consent, credential, revocation, or enrollment purge crypto-erases pending lead commands with the call queue.
+
 This is a technical alpha, not a Play Store-ready release. The enterprise flavor's call-log access requires an approved distribution path, policy/legal review, a real production API origin, release signing, and end-to-end testing on supported devices before deployment.
 
 ## Build variants
@@ -36,8 +38,8 @@ Missing, unreadable, expired, unauthorized, or remotely revoked sessions fail cl
 
 - Jetpack Compose + Material 3: pair-first onboarding, exact server policy, activation, immediate enterprise permission, collector status, diagnostics, settings, rotation, and revocation.
 - Android Keystore + AES-GCM: separate keys and authenticated context for the active credential, crash-safe protocol journal, and queued phone/contact fields.
-- Room: durable offline queue with explicit `PENDING`, `IN_FLIGHT`, `RETRY`, `SYNCED`, and `REJECTED` transitions.
-- WorkManager: network-constrained periodic tick and manual trigger both funnel through one unique one-time sync lane.
+- Room: durable encrypted call and lead-update queues. Lead commands add explicit `CONFLICT` handling and a non-destructive version 1 to 2 migration.
+- WorkManager: one network-constrained periodic tick fans into separate unique call-sync and lead-mutation lanes; both serialize through the same credential/collection mutex.
 - UUID operation IDs plus stable SHA-256 call/batch IDs: mutation IDs are persisted before network use and must exactly equal `Idempotency-Key`.
 - `HttpURLConnection`: bounded response bodies, timeouts, redirects disabled, Bearer auth, and no secret logging.
 
@@ -57,6 +59,8 @@ All successful endpoints return the repository's standard JSON envelope. Authent
 | Upload calls | `POST /v1/mobile/call-batches` | Maximum 100 items; `collectionMode` required; deterministic `Idempotency-Key` and immutable payload |
 | Assigned leads | `GET /v1/mobile/leads` | Current-consent session only; repository enforces the credential employee as an assigned-only scope |
 | Assigned lead detail | `GET /v1/mobile/leads/:leadId` | Returns `404` for another employee or tenant and never accepts a client-supplied employee scope |
+| Lead statuses | `GET /v1/mobile/lead-statuses` | Returns active tenant-owned statuses for the post-call form; the app never hardcodes pipeline IDs |
+| Lead writeback | `POST /v1/mobile/leads/:leadId/updates` | One atomic status/note/follow-up command; UUID body `requestId` exactly matches `Idempotency-Key` and the employee assignment comes only from the session |
 | Prepare rotation | `POST /v1/mobile/session/rotation/prepare` | Old session auth; creates an overlapping pending client-proposed `cls_` credential |
 | Confirm rotation | `POST /v1/mobile/session/rotation/confirm` | Proposed new session auth; uses a distinct confirm UUID plus `prepareRequestId`, promotes new and revokes old, and replays exactly |
 | Revoke session | `DELETE /v1/mobile/session` | UUID body plus matching idempotency key; replay works with the same already-revoked credential |

@@ -70,8 +70,11 @@ object CredentialCodec {
     }
 }
 
-class EncryptedFieldCodec {
-    private val keys = AndroidKeystoreKeyProvider(AndroidKeystoreKeyProvider.FIELD_ALIAS)
+class EncryptedFieldCodec(
+    alias: String = AndroidKeystoreKeyProvider.FIELD_ALIAS,
+    private val namespace: String = "callora.queue.v1",
+) {
+    private val keys = AndroidKeystoreKeyProvider(alias)
     private val cipher = AesGcmCodec(keys::getOrCreate)
 
     fun encrypt(value: String, localId: String, fieldName: String): String = cipher.encrypt(
@@ -87,5 +90,5 @@ class EncryptedFieldCodec {
     fun destroyKey() = keys.delete()
 
     private fun aad(localId: String, fieldName: String): ByteArray =
-        "callora.queue.v1|$localId|$fieldName".toByteArray(StandardCharsets.UTF_8)
+        "$namespace|$localId|$fieldName".toByteArray(StandardCharsets.UTF_8)
 }

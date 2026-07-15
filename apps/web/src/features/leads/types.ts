@@ -11,6 +11,7 @@ import type {
   LeadNote,
   LeadSource,
   LeadStatus,
+  JsonValue,
   UpdateLeadInput,
 } from '@callora/contracts'
 
@@ -54,6 +55,8 @@ export interface LeadTimelineItem {
   detail?: string
   actorName?: string
   occurredAt: string
+  callLogId?: string
+  metadata?: Record<string, JsonValue>
   isLocalDraft?: boolean
 }
 
@@ -154,6 +157,7 @@ export interface LeadPermissions {
   canRead: boolean
   canManage: boolean
   canAssign: boolean
+  canCorrectCallLinks: boolean
 }
 
 export interface LeadQuery {

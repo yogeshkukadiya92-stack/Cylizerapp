@@ -214,6 +214,24 @@ export function fingerprintMobileCallBatch(value: unknown, secret: string): stri
     .digest("hex");
 }
 
+function fingerprintSensitivePayload(value: unknown, secret: string, domain: string): string {
+  if (secret.length < 32) throw new Error("Sensitive-payload fingerprint secret must contain at least 32 characters");
+  return createHmac("sha256", secret)
+    .update(`callora:${domain}:v1\0`)
+    .update(JSON.stringify(value))
+    .digest("hex");
+}
+
+/** Import rows can contain names, phone numbers, and email addresses. */
+export function fingerprintLeadImport(value: unknown, secret: string): string {
+  return fingerprintSensitivePayload(value, secret, "lead-import-payload");
+}
+
+/** Mobile notes and follow-ups can contain customer-provided free text. */
+export function fingerprintMobileLeadUpdate(value: unknown, secret: string): string {
+  return fingerprintSensitivePayload(value, secret, "mobile-lead-update-payload");
+}
+
 export interface SharedAttemptLimiter {
   /** True only when all API replicas observe the same limiter state. */
   readonly isReplicaSafe: boolean;

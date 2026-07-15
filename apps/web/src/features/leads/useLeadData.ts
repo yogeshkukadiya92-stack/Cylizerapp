@@ -25,7 +25,7 @@ import type {
   LeadUpdateRequest,
 } from './types'
 
-const EMPTY_PERMISSIONS: LeadPermissions = { canRead: false, canManage: false, canAssign: false }
+const EMPTY_PERMISSIONS: LeadPermissions = { canRead: false, canManage: false, canAssign: false, canCorrectCallLinks: false }
 
 interface UseLeadDataOptions {
   authSession: AuthSession
@@ -65,6 +65,7 @@ function leadPermissions(permissions: Permission[]): LeadPermissions {
     canRead: permissions.includes('leads.read'),
     canManage: permissions.includes('leads.manage'),
     canAssign: permissions.includes('leads.assign'),
+    canCorrectCallLinks: permissions.includes('leads.manage') && permissions.includes('calls.annotate'),
   }
 }
 
@@ -103,6 +104,7 @@ export function useLeadData({
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [isDemo, setIsDemo] = useState(false)
+  const [refreshVersion, setRefreshVersion] = useState(0)
   const metadataRef = useRef<LeadMeta | null>(null)
   const requestVersionRef = useRef(0)
   const mutationControllersRef = useRef(new Set<AbortController>())
@@ -187,7 +189,7 @@ export function useLeadData({
 
         const leads = cloneDemoLeads()
         metadataRef.current = {
-          permissions: { canRead: true, canManage: true, canAssign: true },
+          permissions: { canRead: true, canManage: true, canAssign: true, canCorrectCallLinks: true },
           owners: demoLeadOwners.map((owner) => ({ ...owner })),
           statuses: demoLeadStatuses.map((status) => ({ ...status })),
         }
@@ -207,7 +209,7 @@ export function useLeadData({
 
     void load()
     return () => controller.abort()
-  }, [authSession, client, isDemo, onAuthenticationFailure, ownerId, queryKey, queue, search, statusId])
+  }, [authSession, client, isDemo, onAuthenticationFailure, ownerId, queryKey, queue, refreshVersion, search, statusId])
 
   useEffect(() => {
     if (!selectedLeadId) {
@@ -567,6 +569,12 @@ export function useLeadData({
     return { value: completed, source }
   }, [client, getMutationToken, isDemo, permissions.canManage, selectedDetail, storeDetail])
 
+  const refresh = useCallback(() => {
+    detailCacheRef.current.clear()
+    setServerSummary(null)
+    setRefreshVersion((current) => current + 1)
+  }, [])
+
   return {
     addNote,
     completeFollowUp,
@@ -579,6 +587,7 @@ export function useLeadData({
     owners,
     permissions,
     referenceAt,
+    refresh,
     selectedDetail,
     selectedLeadId,
     selectLead: setSelectedLeadId,

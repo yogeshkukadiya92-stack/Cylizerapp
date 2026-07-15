@@ -8,6 +8,7 @@ import { AuthGate } from './components/AuthGate'
 import { DashboardWorkspace } from './components/DashboardWorkspace'
 import { ModulePreview } from './components/ModulePreview'
 import { LeadsWorkspace } from './features/leads/LeadsWorkspace'
+import { ReportsWorkspace } from './features/reports/ReportsWorkspace'
 import type { AppModule } from './navigation'
 
 interface DashboardApplicationProps {
@@ -70,6 +71,13 @@ function DashboardApplication({ authSession, authUser, onAuthenticationFailure, 
           onAuthenticationFailure={onAuthenticationFailure}
           onNotify={setToast}
           onSearchChange={setSearchQuery}
+          searchQuery={searchQuery}
+        />
+      ) : activeModule === 'Reports' ? (
+        <ReportsWorkspace
+          authSession={authSession}
+          onAuthenticationFailure={onAuthenticationFailure}
+          onNotify={setToast}
           searchQuery={searchQuery}
         />
       ) : (

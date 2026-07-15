@@ -243,6 +243,74 @@ class HttpMobileApi(
         )
     }
 
+    override suspend fun listLeadStatuses(credentials: DeviceCredentials): List<MobileLeadStatus> {
+        val data = request("GET", MobileRoutes.LEAD_STATUSES, null, credentials.sessionToken, null)
+        val items = data.getJSONArray("items")
+        return List(items.length()) { index ->
+            val item = items.getJSONObject(index)
+            MobileLeadStatus(
+                id = item.requireString("id"),
+                name = item.requireString("name"),
+                color = item.requireString("color"),
+                position = item.getInt("position"),
+                isInitial = item.optBoolean("isInitial", false),
+                isWon = item.optBoolean("isWon", false),
+                isLost = item.optBoolean("isLost", false),
+            )
+        }.sortedWith(compareBy(MobileLeadStatus::position, MobileLeadStatus::name))
+    }
+
+    override suspend fun submitLeadUpdate(
+        credentials: DeviceCredentials,
+        command: LeadUpdateCommand,
+    ): LeadUpdateReceipt {
+        require(command.schemaVersion == 1) { "Unsupported lead update schema" }
+        val body = JSONObject()
+            .put("schemaVersion", command.schemaVersion)
+            .put("requestId", command.requestId)
+            .put("expectedLeadVersion", command.expectedLeadVersion)
+            .put("occurredAt", command.occurredAt)
+            .apply {
+                command.statusId?.let { put("statusId", it) }
+                command.noteBody?.let { put("note", JSONObject().put("body", it)) }
+                command.followUp?.let { followUp ->
+                    put(
+                        "followUp",
+                        JSONObject()
+                            .put("title", followUp.title)
+                            .put("dueAt", followUp.dueAt)
+                            .put("priority", followUp.priority)
+                            .apply {
+                                followUp.notes?.let { put("notes", it) }
+                                followUp.reminderAt?.let { put("reminderAt", it) }
+                            },
+                    )
+                }
+            }
+        val leadId = URLEncoder.encode(command.leadId, StandardCharsets.UTF_8.name())
+        val data = request(
+            method = "POST",
+            path = "${MobileRoutes.LEADS}/$leadId/updates",
+            body = body,
+            bearerToken = credentials.sessionToken,
+            idempotencyKey = command.requestId,
+        )
+        val responseRequestId = data.optStringOrNull("requestId") ?: command.requestId
+        require(responseRequestId == command.requestId) { "Lead update request ID mismatch" }
+        val appliedVersion = data.optLong("appliedLeadVersion", -1L).takeIf { it >= 1 }
+            ?: data.optJSONObject("detail")
+                ?.optJSONObject("item")
+                ?.optJSONObject("lead")
+                ?.optLong("version", -1L)
+                ?.takeIf { it >= 1 }
+            ?: throw IllegalArgumentException("Missing response field: appliedLeadVersion")
+        return LeadUpdateReceipt(
+            requestId = responseRequestId,
+            replayed = data.optBoolean("replayed", false),
+            appliedLeadVersion = appliedVersion,
+        )
+    }
+
     override suspend fun prepareSessionRotation(
         credentials: DeviceCredentials,
         requestId: String,

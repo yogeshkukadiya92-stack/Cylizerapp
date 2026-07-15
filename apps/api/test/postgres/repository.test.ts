@@ -239,6 +239,36 @@ function mobilePermissions() {
   };
 }
 
+function mobileTrustRows(sql: string, consentCurrent = true): QueryResultRow[] | undefined {
+  if (sql.startsWith("select linked_user_id, status from callora.employees")) {
+    return [{ linked_user_id: USER_ID, status: "active" }];
+  }
+  if (sql.startsWith("select * from callora.employee_devices")) {
+    return [{
+      ...deviceRow(),
+      collection_mode: "android_call_log",
+      revoked_at: null,
+    }];
+  }
+  if (sql.startsWith("select id, employee_id, credential_type")) return [{
+    id: CREDENTIAL_ID,
+    employee_id: EMPLOYEE_ID,
+    credential_type: "session",
+    lifecycle_state: "active",
+    consumed_at: null,
+    revoked_at: null,
+    expires_at: "2026-07-22T08:00:00.000Z",
+  }];
+  if (sql.startsWith("select id from callora.device_consent_receipts")) return [{ id: "consent" }];
+  if (sql.startsWith("select status from callora.organizations")) return [{ status: "active" }];
+  if (sql.includes("callora.device_has_current_collection_consent")) return [{ consent_current: consentCurrent }];
+  if (sql.includes("from callora.resolve_mobile_collection_policy")) return [{
+    current_policy_id: POLICY_ID,
+    current_policy_content_hash: POLICY_HASH,
+  }];
+  return undefined;
+}
+
 describe("PostgresCalloraRepository transaction and tenant boundaries", () => {
   it("sets transaction-local tenant/user context and commits an actor lookup", async () => {
     const client = new ScriptedClient(({ text }) => {
@@ -880,9 +910,7 @@ describe("PostgresCalloraRepository transaction and tenant boundaries", () => {
 
   it("returns consent-required without registering a batch when policy rolls in the transaction", async () => {
     const client = new ScriptedClient(({ text }) =>
-      normalized(text).startsWith("select credential.id, callora.device_has_current_collection_consent")
-        ? [{ id: CREDENTIAL_ID, consent_current: false }]
-        : []);
+      mobileTrustRows(normalized(text), false) ?? []);
     const repository = new PostgresCalloraRepository(new ScriptedPool(client), {
       callPiiCrypto: testCallPiiCrypto(),
     });
@@ -920,9 +948,7 @@ describe("PostgresCalloraRepository transaction and tenant boundaries", () => {
 
   it("locks the active mobile trust context and persists heartbeat health fields", async () => {
     const client = new ScriptedClient(({ text }) =>
-      normalized(text).startsWith("select device.call_log_permission")
-        ? [deviceRow()]
-        : []);
+      mobileTrustRows(normalized(text)) ?? []);
     const repository = new PostgresCalloraRepository(new ScriptedPool(client));
 
     const result = await repository.recordDeviceHeartbeat({
@@ -972,16 +998,14 @@ describe("PostgresCalloraRepository transaction and tenant boundaries", () => {
     });
 
     expect(result).toMatchObject({ serverTime: TIMESTAMP, nextHeartbeatAfterSeconds: 900 });
-    const authentication = client.calls.find((call) =>
-      normalized(call.text).startsWith("select device.call_log_permission"));
-    expect(normalized(authentication?.text ?? "")).toContain("for update of credential, device, employee, organization, consent");
-    expect(authentication?.values).toEqual([
-      ORGANIZATION_ID,
-      CREDENTIAL_ID,
-      DEVICE_ID,
-      EMPLOYEE_ID,
-      TIMESTAMP,
-    ]);
+    const lockIndexes = [
+      "select linked_user_id, status from callora.employees",
+      "select * from callora.employee_devices",
+      "select id, employee_id, credential_type",
+      "select id from callora.device_consent_receipts",
+      "select status from callora.organizations",
+    ].map((prefix) => client.calls.findIndex((call) => normalized(call.text).startsWith(prefix)));
+    expect(lockIndexes).toEqual([...lockIndexes].sort((left, right) => left - right));
     const update = client.calls.find((call) =>
       normalized(call.text).startsWith("update callora.employee_devices set app_version"));
     expect(update?.values.slice(12)).toEqual([TIMESTAMP, 73, false, "wifi", 4, 2]);
@@ -999,9 +1023,8 @@ describe("PostgresCalloraRepository transaction and tenant boundaries", () => {
     expect(newlyDerivedCallId).not.toBe(expectedCallId);
     const client = new ScriptedClient(({ text, values }) => {
       const sql = normalized(text);
-      if (sql.startsWith("select credential.id, callora.device_has_current_collection_consent")) {
-        return [{ id: CREDENTIAL_ID, consent_current: true }];
-      }
+      const trustRows = mobileTrustRows(sql);
+      if (trustRows) return trustRows;
       if (sql.includes("callora.register_call_ingest_batch")) return [{ batch_id: INGEST_BATCH_ID }];
       if (sql.startsWith("select response_body from callora.call_ingest_batches")) return [{ response_body: null }];
       if (sql.startsWith("select external_id, id from callora.call_logs")) {
@@ -1082,9 +1105,9 @@ describe("PostgresCalloraRepository transaction and tenant boundaries", () => {
     const responseUpdateIndex = statements.findIndex((sql) => sql.startsWith("update callora.call_ingest_batches set processed_item_count"));
     expect(responseUpdateIndex).toBeGreaterThan(0);
     expect(statements.indexOf("commit")).toBeGreaterThan(responseUpdateIndex);
-    const authentication = client.calls.find((call) => normalized(call.text).includes("device.call_log_permission = 'granted'"));
-    expect(authentication?.values.at(-2)).toBe(false);
-    expect(authentication?.values.at(-1)).toBe("android_call_log");
+    const deviceLock = client.calls.find((call) =>
+      normalized(call.text).startsWith("select * from callora.employee_devices"));
+    expect(deviceLock?.values).toEqual([ORGANIZATION_ID, DEVICE_ID]);
   });
 
   it("ingests a manual call through the encrypted-only database function", async () => {

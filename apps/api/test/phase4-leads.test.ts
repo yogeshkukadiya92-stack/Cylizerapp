@@ -984,6 +984,301 @@ describe("Phase 4A lead workspace API", () => {
     expect(json<Failure>(anonymous).error.code).toBe("UNAUTHENTICATED");
   });
 
+  it("previews and commits imports, applies scoped assignment rules, and serves reports", async () => {
+    const owner = await token();
+    const ruleResponse = await app.inject({
+      method: "POST",
+      url: "/v1/lead-assignment-rules",
+      headers: auth(owner),
+      payload: {
+        name: "Website owner",
+        priority: 10,
+        strategy: "fixed_owner",
+        conditions: { sources: ["website"] },
+        employeeIds: ["emp_alpha_amit"],
+      },
+    });
+    expect(ruleResponse.statusCode).toBe(201);
+
+    const unassignedResponse = await createLead(owner, {
+      firstName: "Unassigned",
+      phoneNumber: "+919811223355",
+      source: "website",
+      statusId: "lead_status_alpha_new",
+      assignedEmployeeId: undefined,
+    });
+    expect(unassignedResponse.statusCode).toBe(201);
+    const unassignedId = json<Success<LeadDetail>>(unassignedResponse).data.item.lead.id;
+
+    const dryRun = await app.inject({
+      method: "POST",
+      url: "/v1/lead-assignment-rules/dry-run",
+      headers: auth(owner),
+      payload: {},
+    });
+    expect(dryRun.statusCode).toBe(200);
+    expect(json<Success<{ matchedLeads: number }>>(dryRun).data.matchedLeads).toBeGreaterThanOrEqual(1);
+
+    const noApplyRequestId = randomUUID();
+    const noApply = await app.inject({
+      method: "POST",
+      url: "/v1/lead-assignment-rules/apply",
+      headers: { ...auth(owner), "idempotency-key": noApplyRequestId },
+      payload: { requestId: noApplyRequestId, includeExistingUnassigned: false },
+    });
+    expect(json<Success<{ appliedLeads: number }>>(noApply).data.appliedLeads).toBe(0);
+
+    const applyRequestId = randomUUID();
+    const applied = await app.inject({
+      method: "POST",
+      url: "/v1/lead-assignment-rules/apply",
+      headers: { ...auth(owner), "idempotency-key": applyRequestId },
+      payload: { requestId: applyRequestId, includeExistingUnassigned: true },
+    });
+    expect(applied.statusCode).toBe(200);
+    expect(json<Success<{ appliedLeads: number }>>(applied).data.appliedLeads).toBeGreaterThanOrEqual(1);
+    const assignedDetail = await app.inject({ method: "GET", url: `/v1/leads/${unassignedId}`, headers: auth(owner) });
+    expect(json<Success<LeadDetail>>(assignedDetail).data.item.lead.assignedEmployeeId).toBe("emp_alpha_amit");
+
+    const previewRequestId = randomUUID();
+    const previewPayload = {
+      requestId: previewRequestId,
+      fileName: "phase4b.csv",
+      rows: [
+        { firstName: "Imported", phoneNumber: "+919811223366", source: "website" },
+        { firstName: "Existing", phoneNumber: "+919876543210", source: "manual" },
+        { firstName: "Broken", phoneNumber: "not-a-phone", source: "not-real" },
+      ],
+    };
+    const preview = await app.inject({
+      method: "POST",
+      url: "/v1/lead-imports/preview",
+      headers: { ...auth(owner), "idempotency-key": previewRequestId },
+      payload: previewPayload,
+    });
+    expect(preview.statusCode).toBe(201);
+    const previewData = json<Success<{
+      job: { id: string; validRows: number; duplicateRows: number; errorRows: number };
+      rows: Array<{ decision: string; issues: Array<{ code: string }> }>;
+      replayed: boolean;
+    }>>(preview).data;
+    expect(previewData).toMatchObject({
+      replayed: false,
+      job: { validRows: 1, duplicateRows: 1, errorRows: 1 },
+    });
+    expect(previewData.rows[2]?.issues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining(["invalid_phone", "invalid_source"]),
+    );
+
+    const replayPreview = await app.inject({
+      method: "POST",
+      url: "/v1/lead-imports/preview",
+      headers: { ...auth(owner), "idempotency-key": previewRequestId },
+      payload: previewPayload,
+    });
+    expect(json<Success<{ replayed: boolean }>>(replayPreview).data.replayed).toBe(true);
+
+    const errors = await app.inject({
+      method: "GET",
+      url: `/v1/lead-imports/${previewData.job.id}/errors`,
+      headers: auth(owner),
+    });
+    expect(errors.headers["content-type"]).toContain("text/csv");
+    expect(errors.body).toContain("invalid_phone");
+    expect(errors.body).not.toContain("not-a-phone");
+
+    const commitRequestId = randomUUID();
+    const committed = await app.inject({
+      method: "POST",
+      url: `/v1/lead-imports/${previewData.job.id}/commit`,
+      headers: { ...auth(owner), "idempotency-key": commitRequestId },
+      payload: { requestId: commitRequestId },
+    });
+    expect(committed.statusCode).toBe(200);
+    expect(json<Success<{ job: { status: string; importedRows: number }; replayed: boolean }>>(committed).data)
+      .toMatchObject({ job: { status: "completed", importedRows: 1 }, replayed: false });
+
+    const manager = await token("manager");
+    const report = await app.inject({
+      method: "GET",
+      url: "/v1/lead-reports?from=2026-07-01T00%3A00%3A00.000Z&to=2026-07-15T00%3A00%3A00.000Z",
+      headers: auth(manager),
+    });
+    expect(report.statusCode).toBe(200);
+    expect(json<Success<{ kpis: { totalLeads: number }; metricDefinitionVersion: string }>>(report).data)
+      .toMatchObject({ metricDefinitionVersion: "2026-07-15", kpis: { totalLeads: expect.any(Number) } });
+  });
+
+  it("supports idempotent manager call corrections and atomic mobile lead updates", async () => {
+    const owner = await token();
+    const ingest = await app.inject({
+      method: "POST",
+      url: "/v1/calls/ingest/simulated",
+      headers: { ...auth(owner), "idempotency-key": "phase4b-correction-call" },
+      payload: {
+        externalId: "phase4b-correction-call",
+        employeeId: "emp_alpha_amit",
+        direction: "incoming",
+        disposition: "missed",
+        phoneNumber: "+919876543210",
+        startedAt: clock.now().toISOString(),
+        durationSeconds: 0,
+        isInternal: false,
+        isWithinWorkingHours: true,
+      },
+    });
+    expect(ingest.statusCode).toBe(201);
+    const callId = json<Success<{ call: { id: string } }>>(ingest).data.call.id;
+    const manager = await token("manager");
+    const correctionRequestId = randomUUID();
+    const correctionPayload = {
+      requestId: correctionRequestId,
+      expectedLeadId: "lead_alpha_ramesh",
+      replacementLeadId: "lead_alpha_aarav",
+      reason: "Correct customer selected after review",
+    };
+    const corrected = await app.inject({
+      method: "POST",
+      url: `/v1/calls/${callId}/lead-link/correct`,
+      headers: { ...auth(manager), "idempotency-key": correctionRequestId },
+      payload: correctionPayload,
+    });
+    expect(corrected.statusCode).toBe(200);
+    expect(json<Success<{ previousLeadId: string; replacementLeadId: string; replayed: boolean }>>(corrected).data)
+      .toMatchObject({ previousLeadId: "lead_alpha_ramesh", replacementLeadId: "lead_alpha_aarav", replayed: false });
+    const correctionReplay = await app.inject({
+      method: "POST",
+      url: `/v1/calls/${callId}/lead-link/correct`,
+      headers: { ...auth(manager), "idempotency-key": correctionRequestId },
+      payload: correctionPayload,
+    });
+    expect(json<Success<{ replayed: boolean }>>(correctionReplay).data.replayed).toBe(true);
+
+    const mobile = await activateMobileEmployee("emp_alpha_amit", "phase4b-mobile-update");
+    const mobileStatuses = await app.inject({
+      method: "GET",
+      url: "/v1/mobile/lead-statuses",
+      headers: auth(mobile.session),
+    });
+    expect(mobileStatuses.statusCode).toBe(200);
+
+    const updateRequestId = randomUUID();
+    const updatePayload = {
+      schemaVersion: 1,
+      requestId: updateRequestId,
+      expectedLeadVersion: 1,
+      occurredAt: clock.now().toISOString(),
+      statusId: "lead_status_alpha_contacted",
+      note: { body: "Discussed requirements after the call" },
+      followUp: {
+        title: "Send proposal",
+        dueAt: "2026-07-16T12:00:00.000Z",
+        reminderAt: "2026-07-16T10:00:00.000Z",
+        priority: "high",
+      },
+    };
+    const updated = await app.inject({
+      method: "POST",
+      url: "/v1/mobile/leads/lead_alpha_aarav/updates",
+      headers: { ...auth(mobile.session), "idempotency-key": updateRequestId },
+      payload: updatePayload,
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(json<Success<{
+      replayed: boolean;
+      appliedLeadVersion: number;
+      detail: LeadDetail;
+    }>>(updated).data).toMatchObject({
+      replayed: false,
+      appliedLeadVersion: 2,
+      detail: {
+        item: { lead: { statusId: "lead_status_alpha_contacted", version: 2 } },
+        notes: expect.arrayContaining([expect.objectContaining({ body: "Discussed requirements after the call" })]),
+        followUps: expect.arrayContaining([expect.objectContaining({ title: "Send proposal" })]),
+      },
+    });
+    const updateReplay = await app.inject({
+      method: "POST",
+      url: "/v1/mobile/leads/lead_alpha_aarav/updates",
+      headers: { ...auth(mobile.session), "idempotency-key": updateRequestId },
+      payload: updatePayload,
+    });
+    const updateReplayData = json<Success<{
+      replayed: boolean;
+      appliedLeadVersion: number;
+      detail?: LeadDetail;
+    }>>(updateReplay).data;
+    expect(updateReplayData).toMatchObject({ replayed: true, appliedLeadVersion: 2 });
+    expect(updateReplayData).not.toHaveProperty("detail");
+  });
+
+  it("replays a lost mobile response after the offline window without exposing reassigned lead detail", async () => {
+    await app.close();
+    repository = new InMemoryCalloraRepository(new SequentialIdGenerator());
+    clock = new FixedClock();
+    app = buildApp({
+      config: { ...config, deviceSessionTtlSeconds: 40 * 24 * 60 * 60 },
+      repository,
+      clock,
+      idGenerator: new SequentialIdGenerator(),
+      pairingCodeGenerator: new SequentialPairingCodeGenerator(),
+      logger: false,
+    });
+
+    const mobile = await activateMobileEmployee("emp_alpha_amit", "phase4b-lost-mobile-response");
+    const requestId = randomUUID();
+    const payload = {
+      schemaVersion: 1,
+      requestId,
+      expectedLeadVersion: 1,
+      occurredAt: clock.now().toISOString(),
+      note: { body: "Applied before the response was lost" },
+    };
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/mobile/leads/lead_alpha_aarav/updates",
+      headers: { ...auth(mobile.session), "idempotency-key": requestId },
+      payload,
+    });
+    expect(first.statusCode).toBe(200);
+    expect(json<Success<{ replayed: boolean; detail?: LeadDetail }>>(first).data)
+      .toMatchObject({ replayed: false, detail: expect.any(Object) });
+
+    const owner = await token();
+    const unassigned = await app.inject({
+      method: "PATCH",
+      url: "/v1/leads/lead_alpha_aarav",
+      headers: auth(owner),
+      payload: { expectedVersion: 2, changes: { assignedEmployeeId: null } },
+    });
+    expect(unassigned.statusCode).toBe(200);
+
+    clock.advanceMinutes(8 * 24 * 60);
+    const replay = await app.inject({
+      method: "POST",
+      url: "/v1/mobile/leads/lead_alpha_aarav/updates",
+      headers: { ...auth(mobile.session), "idempotency-key": requestId },
+      payload,
+    });
+    expect(replay.statusCode).toBe(200);
+    const replayData = json<Success<{
+      requestId: string;
+      replayed: boolean;
+      appliedLeadVersion: number;
+      detail?: LeadDetail;
+    }>>(replay).data;
+    expect(replayData).toEqual({ requestId, replayed: true, appliedLeadVersion: 2 });
+
+    const staleRequestId = randomUUID();
+    const staleFirstApply = await app.inject({
+      method: "POST",
+      url: "/v1/mobile/leads/lead_alpha_aarav/updates",
+      headers: { ...auth(mobile.session), "idempotency-key": staleRequestId },
+      payload: { ...payload, requestId: staleRequestId },
+    });
+    expect(staleFirstApply.statusCode).toBe(400);
+  });
+
   it("rejects malformed lead, query, note, and follow-up inputs", async () => {
     const owner = await token();
     const responses = await Promise.all([
@@ -1049,5 +1344,108 @@ describe("Phase 4A lead workspace API", () => {
     expect(json<Failure>(responses[4]!).error.details?.[0]?.field).toBe("expectedVersion");
     expect(json<Failure>(responses[7]!).error.details?.[0]?.field).toBe("leadId");
     expect(json<Failure>(responses[8]!).error.details?.[0]?.field).toBe("reminderAt");
+  });
+
+  it("enforces bounded imports and explicit RFC3339 report/mobile timestamps", async () => {
+    const owner = await token();
+    const tooManyTags = Array.from({ length: 101 }, (_, index) => `tag-${index}`);
+    let deepCustomFields: Record<string, unknown> = { value: true };
+    for (let depth = 0; depth < 10; depth += 1) deepCustomFields = { nested: deepCustomFields };
+    const numericEmailRequestId = randomUUID();
+    const tooManyTagsRequestId = randomUUID();
+    const deepCustomFieldsRequestId = randomUUID();
+    const importResponses = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/v1/lead-imports/preview",
+        headers: { ...auth(owner), "idempotency-key": numericEmailRequestId },
+        payload: {
+          requestId: numericEmailRequestId,
+          fileName: "numeric-email.csv",
+          rows: [{ firstName: "Invalid", phoneNumber: "+919700000001", email: 42 }],
+        },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/v1/lead-imports/preview",
+        headers: { ...auth(owner), "idempotency-key": tooManyTagsRequestId },
+        payload: {
+          requestId: tooManyTagsRequestId,
+          fileName: "too-many-tags.csv",
+          rows: [{ firstName: "Invalid", phoneNumber: "+919700000002", tagNames: tooManyTags }],
+        },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/v1/lead-imports/preview",
+        headers: { ...auth(owner), "idempotency-key": deepCustomFieldsRequestId },
+        payload: {
+          requestId: deepCustomFieldsRequestId,
+          fileName: "deep-custom-fields.csv",
+          rows: [{ firstName: "Invalid", phoneNumber: "+919700000003", customFields: deepCustomFields }],
+        },
+      }),
+    ]);
+    for (const response of importResponses) {
+      expect(response.statusCode).toBe(400);
+      expect(json<Failure>(response).error.code).toBe("VALIDATION_FAILED");
+    }
+
+    const reportResponses = await Promise.all([
+      app.inject({
+        method: "GET",
+        url: "/v1/lead-reports?from=2026-07-01T00%3A00%3A00&to=2026-07-15T00%3A00%3A00Z",
+        headers: auth(owner),
+      }),
+      app.inject({
+        method: "GET",
+        url: "/v1/lead-reports?from=2026-02-30T00%3A00%3A00Z&to=2026-03-15T00%3A00%3A00Z",
+        headers: auth(owner),
+      }),
+      app.inject({
+        method: "GET",
+        url: "/v1/lead-reports?from=2026-07-01T00%3A00%3A00Z&to=2026-07-15T00%3A00%3A00Z&employeeId=not-a-uuid",
+        headers: auth(owner),
+      }),
+    ]);
+    for (const response of reportResponses) {
+      expect(response.statusCode).toBe(400);
+      expect(json<Failure>(response).error.code).toBe("VALIDATION_FAILED");
+    }
+
+    const mobile = await activateMobileEmployee("emp_alpha_amit", "phase4b-explicit-time-boundary");
+    const offsetlessRequestId = randomUUID();
+    const offsetless = await app.inject({
+      method: "POST",
+      url: "/v1/mobile/leads/lead_alpha_aarav/updates",
+      headers: { ...auth(mobile.session), "idempotency-key": offsetlessRequestId },
+      payload: {
+        schemaVersion: 1,
+        requestId: offsetlessRequestId,
+        expectedLeadVersion: 1,
+        occurredAt: "2026-07-14T12:00:00",
+        note: { body: "Offset is required" },
+      },
+    });
+    expect(offsetless.statusCode).toBe(400);
+
+    const orderedRequestId = randomUUID();
+    const instantOrdered = await app.inject({
+      method: "POST",
+      url: "/v1/mobile/leads/lead_alpha_aarav/updates",
+      headers: { ...auth(mobile.session), "idempotency-key": orderedRequestId },
+      payload: {
+        schemaVersion: 1,
+        requestId: orderedRequestId,
+        expectedLeadVersion: 1,
+        occurredAt: "2026-07-14T12:00:00Z",
+        followUp: {
+          title: "Compare instants",
+          dueAt: "2026-07-16T10:00:00+05:30",
+          reminderAt: "2026-07-16T06:00:00Z",
+        },
+      },
+    });
+    expect(instantOrdered.statusCode).toBe(400);
   });
 });

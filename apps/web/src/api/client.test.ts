@@ -206,3 +206,77 @@ describe('CalloraApiClient lead CRM routes', () => {
     expect(JSON.parse(String(fetcher.mock.calls[3][1]?.body))).toEqual({ expectedVersion: 2 })
   })
 })
+
+describe('CalloraApiClient lead operations routes', () => {
+  it('uses exact import, assignment and correction mutation routes with stable request keys', async () => {
+    const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => jsonResponse({ ok: true, data: {} }))
+    const client = new CalloraApiClient({ fetcher: fetcher as typeof fetch })
+    const requestId = '8c6820bb-c7f4-4f8f-8ee6-2e9e0ad21da6'
+
+    await client.previewLeadImport({
+      requestId,
+      fileName: 'leads.csv',
+      rows: [{ firstName: '', phoneNumber: '' }],
+    }, 'lead-token')
+    await client.commitLeadImport('job/one', { requestId }, 'lead-token')
+    await client.dryRunLeadAssignmentRules('lead-token')
+    await client.applyLeadAssignmentRules({ requestId, includeExistingUnassigned: true }, 'lead-token')
+    await client.correctCallLeadLink('call/one', {
+      requestId,
+      expectedLeadId: 'lead-old',
+      replacementLeadId: 'lead-new',
+      reason: 'The incoming number belonged to a different customer.',
+    }, 'lead-token')
+
+    expect(new URL(String(fetcher.mock.calls[0][0])).pathname).toBe('/v1/lead-imports/preview')
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body)).rows).toEqual([{ firstName: '', phoneNumber: '' }])
+    expect(new URL(String(fetcher.mock.calls[1][0])).pathname).toBe('/v1/lead-imports/job%2Fone/commit')
+    expect(new URL(String(fetcher.mock.calls[2][0])).pathname).toBe('/v1/lead-assignment-rules/dry-run')
+    expect(JSON.parse(String(fetcher.mock.calls[2][1]?.body))).toEqual({})
+    expect(new URL(String(fetcher.mock.calls[3][0])).pathname).toBe('/v1/lead-assignment-rules/apply')
+    expect(new URL(String(fetcher.mock.calls[4][0])).pathname).toBe('/v1/calls/call%2Fone/lead-link/correct')
+    for (const callIndex of [0, 1, 3, 4]) {
+      expect((fetcher.mock.calls[callIndex][1]?.headers as Headers).get('Idempotency-Key')).toBe(requestId)
+    }
+  })
+
+  it('encodes report filters and downloads import errors without ambient cookies', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      if (new URL(String(input)).pathname.endsWith('/errors')) {
+        return {
+          blob: async () => new Blob(['row,message\r\n2,Invalid phone\r\n'], { type: 'text/csv' }),
+          headers: new Headers({ 'Content-Disposition': "attachment; filename*=UTF-8''invalid%20leads.csv" }),
+          ok: true,
+          status: 200,
+        } as Response
+      }
+      return jsonResponse({ ok: true, data: {} })
+    })
+    const client = new CalloraApiClient({ fetcher: fetcher as typeof fetch })
+
+    await client.getLeadReport({
+      from: '2026-07-01T00:00:00.000Z',
+      to: '2026-07-31T23:59:59.999Z',
+      employeeId: 'employee one',
+      team: 'West & Enterprise',
+      source: 'google_ads',
+    }, 'lead-token')
+    const downloaded = await client.downloadLeadImportErrors('job/one', 'lead-token')
+    const reportUrl = new URL(String(fetcher.mock.calls[0][0]))
+
+    expect(reportUrl.pathname).toBe('/v1/lead-reports')
+    expect(Object.fromEntries(reportUrl.searchParams)).toEqual({
+      from: '2026-07-01T00:00:00.000Z',
+      to: '2026-07-31T23:59:59.999Z',
+      employeeId: 'employee one',
+      team: 'West & Enterprise',
+      source: 'google_ads',
+    })
+    expect(new URL(String(fetcher.mock.calls[1][0])).pathname).toBe('/v1/lead-imports/job%2Fone/errors')
+    expect(fetcher.mock.calls[1][1]?.credentials).toBe('omit')
+    expect((fetcher.mock.calls[1][1]?.headers as Headers).get('Accept')).toBe('text/csv')
+    expect(downloaded.fileName).toBe('invalid leads.csv')
+    expect(downloaded.blob.type).toBe('text/csv')
+    expect(downloaded.blob.size).toBeGreaterThan(0)
+  })
+})

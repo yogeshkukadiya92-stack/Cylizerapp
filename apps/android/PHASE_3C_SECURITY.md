@@ -9,6 +9,7 @@
 - Every proposed credential, operation bearer, request ID, and exact immutable receipt is Keystore AES-GCM encrypted and synchronously committed before network use.
 - Collection requires secret-free `IDLE` protocol state, an acknowledged current policy/receipt, a valid session, local consent, non-stale server consent, and the flavor-specific permission gate.
 - Any identity or consent transition closes collection before source reads. Enrollment, stale consent, revocation, invalid credentials, and unreadable crypto state purge the queue before another tenant can own the installation.
+- Phase 4B lead writebacks are immutable, employee/device-bound composite commands. User-entered notes and follow-up text are encrypted under a separate Keystore key, request IDs exactly match `Idempotency-Key`, and the commands are purged at the same identity/consent boundaries as call metadata.
 - Activation and renewed consent set a durable lower-bound checkpoint at the affirmative decision time. No historical backfill is performed.
 
 ## Journal phases

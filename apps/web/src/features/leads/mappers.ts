@@ -119,6 +119,8 @@ export function mapLeadDetail(detail: LeadApiDetail): LeadDetailView {
       kind: activity.kind,
       summary: activity.summary,
       occurredAt: activity.occurredAt,
+      ...(activity.callLogId ? { callLogId: activity.callLogId } : {}),
+      ...(activity.metadata ? { metadata: activity.metadata } : {}),
     }))
   return {
     lead: mapLeadListItem(detail.item),

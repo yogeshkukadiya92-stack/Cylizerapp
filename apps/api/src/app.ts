@@ -14,7 +14,15 @@ import {
   isFollowUpPriority,
   isIsoDateTime,
   isLeadQueueKey,
+  isLeadReportFilter,
   isLeadSource,
+  isApplyLeadAssignmentRulesInput,
+  isCommitLeadImportInput,
+  isCorrectCallLeadLinkInput,
+  isCreateLeadAssignmentRuleInput,
+  isMobileLeadUpdateInput,
+  isPreviewLeadImportInput,
+  isUpdateLeadAssignmentRuleInput,
   isMobileActivationInput,
   isMobileCollectionMode,
   isMobileReconsentInput,
@@ -37,6 +45,8 @@ import {
   type Employee,
   type EmployeeStatus,
   type JsonValue,
+  type LeadImportPreview,
+  type LeadReportFilter,
   type LeadTemperature,
   type Permission,
   type SystemRoleKey,
@@ -71,7 +81,9 @@ import {
   type Clock,
   CursorCodec,
   fingerprint,
+  fingerprintLeadImport,
   fingerprintMobileCallBatch,
+  fingerprintMobileLeadUpdate,
   hashDeviceCredential,
   hashPairingCode,
   hashPairingRateLimitDimension,
@@ -521,6 +533,21 @@ function operationRequest(request: FastifyRequest, body: unknown): {
     throw badRequest("Idempotency-Key must exactly match requestId", "Idempotency-Key");
   }
   return { requestId: body.requestId, requestFingerprint: fingerprint(body) };
+}
+
+function leadImportErrorCsv(preview: LeadImportPreview): string {
+  const cell = (value: string | number): string => {
+    let text = String(value).replace(/\r?\n/g, " ");
+    if (/^[=+\-@]/.test(text)) text = `'${text}`;
+    return `"${text.replace(/"/g, '""')}"`;
+  };
+  const rows: Array<Array<string | number>> = [["rowNumber", "decision", "field", "code", "message"]];
+  for (const row of preview.rows) {
+    for (const issue of row.issues) {
+      rows.push([row.rowNumber, row.decision, issue.field, issue.code, issue.message]);
+    }
+  }
+  return `${rows.map((row) => row.map(cell).join(",")).join("\r\n")}\r\n`;
 }
 
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
@@ -1155,6 +1182,244 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return success(request, detail);
   });
 
+  app.post("/v1/lead-imports/preview", { preHandler: protect("leads.assign") }, async (request, reply) => {
+    const actor = currentActor(request);
+    if (!isPreviewLeadImportInput(request.body)) throw badRequest("The lead import preview payload is invalid");
+    operationRequest(request, request.body);
+    const at = clock.now().toISOString();
+    const preview = await repository.previewLeadImport({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      input: request.body,
+      actorUserId: actor.user.id,
+      requestFingerprint: fingerprintLeadImport(request.body, config.authSecret),
+      at,
+    });
+    if (!preview.replayed) {
+      await audit({
+        organizationId: actor.organization.id,
+        actorUserId: actor.user.id,
+        requestId: request.body.requestId,
+        action: "lead_import.previewed",
+        entityType: "lead_import",
+        entityId: preview.job.id,
+        metadata: {
+          totalRows: preview.job.totalRows,
+          validRows: preview.job.validRows,
+          duplicateRows: preview.job.duplicateRows,
+          errorRows: preview.job.errorRows,
+        },
+      }, at);
+    }
+    return reply.status(201).send(success(request, preview));
+  });
+
+  app.get("/v1/lead-imports", { preHandler: protect("leads.assign") }, async (request) => {
+    const actor = currentActor(request);
+    const items = await repository.listLeadImports({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      actorUserId: actor.user.id,
+    });
+    return success(request, { items });
+  });
+
+  app.get("/v1/lead-imports/:jobId", { preHandler: protect("leads.assign") }, async (request) => {
+    const actor = currentActor(request);
+    const params = isRecord(request.params) ? request.params : {};
+    const jobId = requiredString(params.jobId, "jobId", 100);
+    const preview = await repository.findLeadImport({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      actorUserId: actor.user.id,
+      jobId,
+    });
+    if (!preview) throw notFound("Lead import not found");
+    return success(request, preview);
+  });
+
+  app.get("/v1/lead-imports/:jobId/errors", { preHandler: protect("leads.assign") }, async (request, reply) => {
+    const actor = currentActor(request);
+    const params = isRecord(request.params) ? request.params : {};
+    const jobId = requiredString(params.jobId, "jobId", 100);
+    const preview = await repository.findLeadImport({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      actorUserId: actor.user.id,
+      jobId,
+    });
+    if (!preview) throw notFound("Lead import not found");
+    void reply.header("content-disposition", `attachment; filename="lead-import-${jobId}-errors.csv"`);
+    return reply.type("text/csv; charset=utf-8").send(leadImportErrorCsv(preview));
+  });
+
+  app.post("/v1/lead-imports/:jobId/commit", { preHandler: protect("leads.assign") }, async (request) => {
+    const actor = currentActor(request);
+    if (!isCommitLeadImportInput(request.body)) throw badRequest("The lead import commit payload is invalid");
+    const params = isRecord(request.params) ? request.params : {};
+    const jobId = requiredString(params.jobId, "jobId", 100);
+    const { requestFingerprint } = operationRequest(request, request.body);
+    const at = clock.now().toISOString();
+    const result = await repository.commitLeadImport({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      actorUserId: actor.user.id,
+      jobId,
+      input: request.body,
+      requestFingerprint,
+      at,
+    });
+    if (!result) throw notFound("Lead import not found");
+    if (!result.replayed) {
+      await audit({
+        organizationId: actor.organization.id,
+        actorUserId: actor.user.id,
+        requestId: request.body.requestId,
+        action: "lead_import.committed",
+        entityType: "lead_import",
+        entityId: jobId,
+        metadata: { status: result.job.status, importedRows: result.job.importedRows },
+      }, at);
+    }
+    return success(request, result);
+  });
+
+  app.get("/v1/lead-assignment-rules", { preHandler: protect("leads.assign") }, async (request) => {
+    const actor = currentActor(request);
+    const items = await repository.listLeadAssignmentRules({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      actorUserId: actor.user.id,
+      at: clock.now().toISOString(),
+    });
+    return success(request, { items });
+  });
+
+  app.post("/v1/lead-assignment-rules", { preHandler: protect("leads.assign") }, async (request, reply) => {
+    const actor = currentActor(request);
+    if (!isCreateLeadAssignmentRuleInput(request.body)) throw badRequest("The assignment rule payload is invalid");
+    const at = clock.now().toISOString();
+    const rule = await repository.createLeadAssignmentRule({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      input: request.body,
+      actorUserId: actor.user.id,
+      at,
+    });
+    if (!rule) throw badRequest("Rule employees or statuses are outside your active lead scope");
+    await audit({
+      organizationId: actor.organization.id,
+      actorUserId: actor.user.id,
+      action: "assignment_rule.created",
+      entityType: "assignment_rule",
+      entityId: rule.id,
+      metadata: { strategy: rule.strategy, employeeCount: rule.employeeIds.length },
+    }, at);
+    return reply.status(201).send(success(request, rule));
+  });
+
+  app.patch("/v1/lead-assignment-rules/:ruleId", { preHandler: protect("leads.assign") }, async (request) => {
+    const actor = currentActor(request);
+    if (!isUpdateLeadAssignmentRuleInput(request.body)) throw badRequest("The assignment rule update is invalid");
+    const params = isRecord(request.params) ? request.params : {};
+    const ruleId = requiredString(params.ruleId, "ruleId", 100);
+    const at = clock.now().toISOString();
+    const rule = await repository.updateLeadAssignmentRule({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      ruleId,
+      input: request.body,
+      actorUserId: actor.user.id,
+      at,
+    });
+    if (!rule) throw notFound("Assignment rule not found");
+    await audit({
+      organizationId: actor.organization.id,
+      actorUserId: actor.user.id,
+      action: "assignment_rule.updated",
+      entityType: "assignment_rule",
+      entityId: rule.id,
+      metadata: { version: rule.version, active: rule.active },
+    }, at);
+    return success(request, rule);
+  });
+
+  app.post("/v1/lead-assignment-rules/dry-run", { preHandler: protect("leads.assign") }, async (request) => {
+    const actor = currentActor(request);
+    if (request.body !== undefined && (!isRecord(request.body) || Object.keys(request.body).length > 0)) {
+      throw badRequest("The dry-run body must be an empty JSON object");
+    }
+    const result = await repository.dryRunLeadAssignmentRules({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      actorUserId: actor.user.id,
+      at: clock.now().toISOString(),
+    });
+    return success(request, result);
+  });
+
+  app.post("/v1/lead-assignment-rules/apply", { preHandler: protect("leads.assign") }, async (request) => {
+    const actor = currentActor(request);
+    if (!isApplyLeadAssignmentRulesInput(request.body)) throw badRequest("The assignment apply payload is invalid");
+    const { requestFingerprint } = operationRequest(request, request.body);
+    const at = clock.now().toISOString();
+    const result = await repository.applyLeadAssignmentRules({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      actorUserId: actor.user.id,
+      input: request.body,
+      requestFingerprint,
+      at,
+    });
+    if (!result.replayed && result.appliedLeads > 0) {
+      await audit({
+        organizationId: actor.organization.id,
+        actorUserId: actor.user.id,
+        requestId: request.body.requestId,
+        action: "assignment_rule.applied",
+        entityType: "assignment_rule",
+        entityId: actor.organization.id,
+        metadata: { appliedLeads: result.appliedLeads, matchedLeads: result.matchedLeads },
+      }, at);
+    }
+    return success(request, result);
+  });
+
+  app.get("/v1/lead-reports", { preHandler: protect("reports.read") }, async (request) => {
+    const actor = currentActor(request);
+    const query = queryRecord(request);
+    const from = optionalQueryString(query.from, "from");
+    const to = optionalQueryString(query.to, "to");
+    if (!from || !to) throw badRequest("from and to are required", from ? "to" : "from");
+    const employeeId = optionalQueryString(query.employeeId, "employeeId");
+    const team = optionalQueryString(query.team, "team");
+    const source = optionalQueryString(query.source, "source");
+    if (team && team.length > 100) throw badRequest("team must not exceed 100 characters", "team");
+    if (source !== undefined && !isLeadSource(source)) throw badRequest("source is invalid", "source");
+    const filter: LeadReportFilter = {
+      from,
+      to,
+      ...(employeeId === undefined ? {} : { employeeId }),
+      ...(team === undefined ? {} : { team }),
+      ...(source === undefined ? {} : { source }),
+    };
+    if (!isLeadReportFilter(filter)) {
+      throw badRequest("Report timestamps must be explicit RFC3339 values and employeeId must be a canonical UUID");
+    }
+    const duration = Date.parse(to) - Date.parse(from);
+    if (duration <= 0 || duration > 366 * 24 * 60 * 60 * 1_000) {
+      throw badRequest("The report range must be positive and no longer than 366 days");
+    }
+    const report = await repository.getLeadReport({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      filter,
+      timeZone: actor.organization.settings.timeZone,
+      at: clock.now().toISOString(),
+    });
+    return success(request, report);
+  });
+
   app.post("/v1/employees/:employeeId/pairing-codes", { preHandler: protectOrganizationAdmin("devices.manage") }, async (request, reply) => {
     const actor = currentActor(request);
     const params = isRecord(request.params) ? request.params : {};
@@ -1499,6 +1764,40 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return success(request, detail);
   });
 
+  app.get("/v1/mobile/lead-statuses", { preHandler: authenticateMobile("session") }, async (request) => {
+    const context = currentMobileDevice(request);
+    if (!context.consentCurrent) throw consentRequired();
+    const items = await repository.listLeadStatuses(context.organizationId);
+    return success(request, { items });
+  });
+
+  app.post("/v1/mobile/leads/:leadId/updates", {
+    preHandler: authenticateMobile("session"),
+  }, async (request) => {
+    const context = currentMobileDevice(request);
+    if (!context.consentCurrent) throw consentRequired();
+    if (!isMobileLeadUpdateInput(request.body)) {
+      throw badRequest("The mobile lead update payload is invalid");
+    }
+    const params = isRecord(request.params) ? request.params : {};
+    const leadId = requiredString(params.leadId, "leadId", 100);
+    operationRequest(request, request.body);
+    const now = clock.now();
+    if (request.body.followUp?.reminderAt &&
+      Date.parse(request.body.followUp.reminderAt) > Date.parse(request.body.followUp.dueAt)) {
+      throw badRequest("followUp.reminderAt cannot be after followUp.dueAt", "followUp.reminderAt");
+    }
+    const receipt = await repository.applyMobileLeadUpdate({
+      context,
+      leadId,
+      input: request.body,
+      requestFingerprint: fingerprintMobileLeadUpdate(request.body, config.authSecret),
+      at: now.toISOString(),
+    });
+    if (!receipt) throw notFound("Lead not found");
+    return success(request, receipt);
+  });
+
   app.post("/v1/mobile/heartbeat", { preHandler: authenticateMobile("session") }, async (request) => {
     if (!isDeviceHeartbeat(request.body)) throw badRequest("The device heartbeat payload is invalid");
     const context = currentMobileDevice(request);
@@ -1739,6 +2038,27 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       items: presentCalls(actor, result.items),
       cursorInfo: { hasMore: result.hasMore, ...(nextCursor === undefined ? {} : { nextCursor }) },
     });
+  });
+
+  app.post("/v1/calls/:callId/lead-link/correct", {
+    preHandler: [authenticate, requirePermission("calls.annotate"), requirePermission("leads.assign")],
+  }, async (request) => {
+    const actor = currentActor(request);
+    if (!isCorrectCallLeadLinkInput(request.body)) throw badRequest("The call-link correction payload is invalid");
+    const params = isRecord(request.params) ? request.params : {};
+    const callId = requiredString(params.callId, "callId", 100);
+    const { requestFingerprint } = operationRequest(request, request.body);
+    const result = await repository.correctCallLeadLink({
+      organizationId: actor.organization.id,
+      scope: actor.leadScope,
+      callId,
+      input: request.body,
+      actorUserId: actor.user.id,
+      requestFingerprint,
+      at: clock.now().toISOString(),
+    });
+    if (!result) throw notFound("Call or replacement lead not found in your scope");
+    return success(request, result);
   });
 
   app.get("/v1/dashboard/overview", { preHandler: protectOrganizationRead("calls.read") }, async (request) => {

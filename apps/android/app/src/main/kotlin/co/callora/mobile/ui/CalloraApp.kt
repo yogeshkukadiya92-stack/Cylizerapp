@@ -51,6 +51,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -69,7 +70,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import co.callora.mobile.calls.VariantCapabilities
 import co.callora.mobile.BuildConfig
 import co.callora.mobile.core.onboarding.OnboardingStage
@@ -82,6 +87,7 @@ import java.time.format.DateTimeFormatter
 fun CalloraApp(viewModel: CalloraViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val snackbar = remember { SnackbarHostState() }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -99,6 +105,17 @@ fun CalloraApp(viewModel: CalloraViewModel) {
             snackbar.showSnackbar(it)
             viewModel.dismissMessage()
         }
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> viewModel.onHostStopped()
+                Lifecycle.Event.ON_RESUME -> viewModel.onHostResumed()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Scaffold(
@@ -152,7 +169,7 @@ fun CalloraApp(viewModel: CalloraViewModel) {
                     context.startActivity(
                         Intent(
                             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            Uri.parse("package:${context.packageName}"),
+                            "package:${context.packageName}".toUri(),
                         ),
                     )
                 },
@@ -162,11 +179,17 @@ fun CalloraApp(viewModel: CalloraViewModel) {
                 state = state,
                 onSync = viewModel::syncNow,
                 onRefreshLeads = viewModel::refreshAssignedLeads,
-                onDialLead = { phoneNumber ->
-                    context.startActivity(
-                        Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(phoneNumber)}")),
-                    )
+                onDialLead = { lead ->
+                    viewModel.markDialerLaunch(lead.id)
+                    runCatching {
+                        context.startActivity(
+                            Intent(Intent.ACTION_DIAL, "tel:${Uri.encode(lead.phoneNumber)}".toUri()),
+                        )
+                    }.onFailure {
+                        viewModel.dialLaunchFailed()
+                    }
                 },
+                onOpenLeadUpdate = viewModel::openLeadUpdate,
                 onSaveApiUrl = viewModel::saveApiBaseUrl,
                 onRotate = viewModel::rotateSession,
                 onRevoke = viewModel::revokeAndWithdrawConsent,
@@ -178,6 +201,16 @@ fun CalloraApp(viewModel: CalloraViewModel) {
                 onReset = viewModel::resetRevokedDevice,
             )
         }
+    }
+    state.leadUpdateComposer?.let { composer ->
+        PostCallUpdateSheet(
+            lead = composer.lead,
+            statuses = state.leadStatuses,
+            postCall = composer.postCall,
+            saving = state.leadMutationSaving,
+            onDismiss = viewModel::dismissLeadUpdate,
+            onSubmit = viewModel::submitLeadUpdate,
+        )
     }
 }
 
@@ -428,13 +461,20 @@ private fun ReadyScreen(
     state: CalloraUiState,
     onSync: () -> Unit,
     onRefreshLeads: () -> Unit,
-    onDialLead: (String) -> Unit,
+    onDialLead: (AssignedLead) -> Unit,
+    onOpenLeadUpdate: (String) -> Unit,
     onSaveApiUrl: (String) -> Unit,
     onRotate: () -> Unit,
     onRevoke: () -> Unit,
 ) {
     when (state.section) {
-        ReadySection.LEADS -> LeadsScreen(modifier, state, onRefreshLeads, onDialLead)
+        ReadySection.LEADS -> LeadsScreen(
+            modifier,
+            state,
+            onRefreshLeads,
+            onDialLead,
+            onOpenLeadUpdate,
+        )
         ReadySection.STATUS -> StatusScreen(modifier, state, onSync)
         ReadySection.DIAGNOSTICS -> DiagnosticsScreen(modifier, state)
         ReadySection.SETTINGS -> SettingsScreen(modifier, state, onSaveApiUrl, onRotate, onRevoke)
@@ -454,7 +494,8 @@ private fun LeadsScreen(
     modifier: Modifier,
     state: CalloraUiState,
     onRefresh: () -> Unit,
-    onDial: (String) -> Unit,
+    onDial: (AssignedLead) -> Unit,
+    onOpenUpdate: (String) -> Unit,
 ) {
     var search by rememberSaveable { mutableStateOf("") }
     var queue by rememberSaveable { mutableStateOf(LeadQueue.ALL) }
@@ -555,7 +596,14 @@ private fun LeadsScreen(
             }
         } else {
             items(leads, key = AssignedLead::id) { lead ->
-                LeadCard(lead, onOpen = { selectedLead = lead }, onDial = { onDial(lead.phoneNumber) })
+                LeadCard(
+                    lead = lead,
+                    pending = lead.id in state.pendingLeadMutationIds,
+                    conflicted = lead.id in state.conflictedLeadMutationIds,
+                    rejected = lead.id in state.rejectedLeadMutationIds,
+                    onOpen = { selectedLead = lead },
+                    onDial = { onDial(lead) },
+                )
             }
         }
         state.leadsGeneratedAt?.let { generatedAt ->
@@ -582,17 +630,51 @@ private fun LeadsScreen(
                 InfoRow("Last contacted", lead.lastContactedAt?.let(::formatLeadDate) ?: "Not contacted")
                 InfoRow("Next follow-up", lead.nextFollowUpAt?.let(::formatLeadDate) ?: "Not scheduled")
                 lead.nextFollowUpTitle?.let { InfoRow("Next action", it) }
-                Button(
-                    onClick = { onDial(lead.phoneNumber) },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                ) { Text("Call ${lead.firstName}") }
+                when {
+                    lead.id in state.pendingLeadMutationIds -> StatusBanner(
+                        "Update waiting to sync",
+                        "Another update can be added after this encrypted command is acknowledged.",
+                    )
+                    lead.id in state.conflictedLeadMutationIds -> StatusBanner(
+                        "Update needs review",
+                        "Refresh this lead before entering the update again.",
+                    )
+                    lead.id in state.rejectedLeadMutationIds -> StatusBanner(
+                        "Update was not accepted",
+                        "Refresh this lead and enter the update again.",
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            selectedLead = null
+                            onOpenUpdate(lead.id)
+                        },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        enabled = lead.id !in state.pendingLeadMutationIds,
+                    ) { Text("Update lead") }
+                    Button(
+                        onClick = {
+                            selectedLead = null
+                            onDial(lead)
+                        },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    ) { Text("Call ${lead.firstName}") }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun LeadCard(lead: AssignedLead, onOpen: () -> Unit, onDial: () -> Unit) {
+private fun LeadCard(
+    lead: AssignedLead,
+    pending: Boolean,
+    conflicted: Boolean,
+    rejected: Boolean,
+    onOpen: () -> Unit,
+    onDial: () -> Unit,
+) {
     ElevatedCard(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
     ) {
@@ -625,6 +707,19 @@ private fun LeadCard(lead: AssignedLead, onOpen: () -> Unit, onDial: () -> Unit)
                 )
             } else {
                 Text("No follow-up scheduled", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (pending || conflicted || rejected) {
+                Text(
+                    when {
+                        pending -> "Update waiting to sync"
+                        conflicted -> "Update conflict · refresh required"
+                        else -> "Update rejected · refresh required"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (conflicted || rejected) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold,
+                )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onOpen, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
@@ -899,6 +994,14 @@ private fun friendlyError(code: String): String = when (code) {
     "POLICY_PURPOSE_MISMATCH" -> "This policy does not authorize call-metadata collection. Collection remains off."
     "POLICY_ID_MISMATCH", "POLICY_HASH_MISMATCH" -> "The policy changed during setup. Collection remains off; reload the authoritative policy."
     "API_URL_INVALID" -> "Enter an allowed API address. Production requires HTTPS."
+    "LEAD_NOT_AVAILABLE" -> "That lead is no longer assigned. Refresh and try again."
+    "LEAD_UPDATE_INVALID", "LEAD_UPDATE_EMPTY" -> "Choose a valid status, note, or follow-up."
+    "LEAD_NOTE_INVALID" -> "The call note is too long."
+    "FOLLOW_UP_NOTES_INVALID" -> "The follow-up notes are too long."
+    "LEAD_UPDATE_GATE_CLOSED" -> "Lead updates are unavailable until the current mobile session and policy are ready."
+    "FOLLOW_UP_TITLE_INVALID" -> "Add a valid follow-up title."
+    "FOLLOW_UP_DUE_AT_INVALID", "FOLLOW_UP_REMINDER_AFTER_DUE" -> "Choose a valid follow-up time."
+    "DIAL_UNAVAILABLE" -> "No phone app is available for this call."
     "REVOCATION_PENDING" -> "Complete server revocation before starting a new setup."
     "REVOCATION_CREDENTIAL_MISSING" -> "The local revocation credential is unavailable. Collection remains stopped; ask an administrator to revoke this device."
     else -> "The operation could not be completed ($code)."

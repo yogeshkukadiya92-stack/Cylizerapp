@@ -10,6 +10,7 @@ export * from "./employees.js";
 export * from "./device-recovery.js";
 export * from "./calls.js";
 export * from "./leads.js";
+export * from "./lead-operations.js";
 export * from "./analytics.js";
 export * from "./api.js";
 export * from "./sync.js";

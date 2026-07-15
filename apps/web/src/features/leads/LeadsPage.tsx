@@ -8,6 +8,7 @@ import {
   SlidersHorizontal,
   Upload,
   UserRound,
+  Workflow,
 } from 'lucide-react'
 import { LeadDetailPanel } from './LeadDetailPanel'
 import { LeadTable } from './LeadTable'
@@ -19,6 +20,7 @@ import type {
   LeadPermissions,
   LeadQueueFilter,
   LeadStatusOption,
+  LeadTimelineItem,
   LeadUpdateRequest,
 } from './types'
 
@@ -41,9 +43,12 @@ interface LeadsPageProps {
   summary: LeadListSummary
   timeZone: string
   onAddLead: () => void
+  onImportCsv: () => void
+  onManageAssignmentRules: () => void
   onAddNote: () => void
   onCloseDetail: () => void
   onCompleteFollowUp: (followUpId: string) => Promise<boolean>
+  onCorrectCallLink: (item: LeadTimelineItem) => void
   onOwnerChange: (ownerId: string) => void
   onQueueChange: (queue: LeadQueueFilter) => void
   onScheduleFollowUp: () => void
@@ -79,9 +84,12 @@ export function LeadsPage({
   summary,
   timeZone,
   onAddLead,
+  onImportCsv,
+  onManageAssignmentRules,
   onAddNote,
   onCloseDetail,
   onCompleteFollowUp,
+  onCorrectCallLink,
   onOwnerChange,
   onQueueChange,
   onScheduleFollowUp,
@@ -158,7 +166,12 @@ export function LeadsPage({
       </div>
 
       <div className="lead-primary-actions">
-        <button aria-disabled="true" className="secondary-button lead-import-button" disabled title="Bulk CSV import is planned for Phase 4B" type="button">
+        {permissions.canAssign ? (
+          <button className="secondary-button lead-rules-button" onClick={onManageAssignmentRules} type="button">
+            <Workflow size={17} />Assignment rules
+          </button>
+        ) : null}
+        <button className="secondary-button lead-import-button" disabled={!permissions.canManage} onClick={onImportCsv} type="button">
           <Upload size={17} />Import CSV
         </button>
         {permissions.canManage ? (
@@ -183,6 +196,7 @@ export function LeadsPage({
             onAddNote={onAddNote}
             onClose={onCloseDetail}
             onCompleteFollowUp={onCompleteFollowUp}
+            onCorrectCallLink={onCorrectCallLink}
             onScheduleFollowUp={onScheduleFollowUp}
             onUpdate={onUpdateLead}
             owners={owners}

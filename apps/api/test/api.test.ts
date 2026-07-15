@@ -465,9 +465,11 @@ describe("Callora API", () => {
           "organization.read",
           "employees.read",
           "calls.read",
+          "calls.annotate",
           "leads.read",
           "leads.manage",
           "leads.assign",
+          "reports.read",
         ]);
 
       const employeeSession = await app.inject({

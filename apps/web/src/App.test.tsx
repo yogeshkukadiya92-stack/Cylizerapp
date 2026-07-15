@@ -91,14 +91,14 @@ describe('Callora dashboard', () => {
     expect(screen.getByText('Kiran Shah added as a local draft · not synced')).toBeInTheDocument()
   })
 
-  it('opens a planned module and returns to the dashboard', () => {
+  it('opens the real lead reports module', async () => {
     render(<App />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Reports' }))
-    expect(screen.getByRole('heading', { name: 'Reports' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Return to dashboard' }))
-
-    expect(screen.getByRole('heading', { name: 'Team calling overview' })).toBeInTheDocument()
+    expect(await screen.findByRole('status', { name: 'Report data source: demo' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Lead reports' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Lead report key metrics' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Return to dashboard' })).not.toBeInTheDocument()
   })
 
   it('mounts the real lead pipeline instead of a module preview', async () => {

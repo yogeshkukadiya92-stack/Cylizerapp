@@ -1,4 +1,5 @@
 import { randomInt, randomUUID } from "node:crypto";
+import { isLeadSource } from "@callora/contracts";
 import type {
   CallLogSyncResult,
   CallLog,
@@ -15,6 +16,15 @@ import type {
   LeadNote,
   LeadQueueSummary,
   LeadStatus,
+  LeadAssignmentRule,
+  LeadImportPreview,
+  LeadImportResult,
+  LeadImportJob,
+  LeadAssignmentDryRun,
+  ApplyLeadAssignmentRulesResult,
+  CorrectCallLeadLinkResult,
+  MobileLeadUpdateReceipt,
+  LeadReport,
   Organization,
   OrganizationId,
   Role,
@@ -39,6 +49,16 @@ import type {
   CreateLeadNoteOptions,
   CreateLeadFollowUpOptions,
   CompleteLeadFollowUpOptions,
+  PreviewLeadImportOptions,
+  LeadImportAccessOptions,
+  CommitLeadImportOptions,
+  CreateLeadAssignmentRuleOptions,
+  UpdateLeadAssignmentRuleOptions,
+  LeadAssignmentOperationOptions,
+  ApplyLeadAssignmentRulesOptions,
+  CorrectCallLeadLinkOptions,
+  MobileLeadUpdateOptions,
+  LeadReportOptions,
   IngestCallResult,
   MobileActivationPayload,
   MobileCallBatchOptions,
@@ -59,7 +79,7 @@ import type {
   SimulatedCallInput,
 } from "./domain.js";
 import { ROLE_PERMISSIONS } from "./domain.js";
-import { conflict, consentRequired } from "./errors.js";
+import { badRequest, conflict, consentRequired, forbidden } from "./errors.js";
 import { fingerprint, type Clock } from "./security.js";
 
 export interface IdGenerator {
@@ -143,6 +163,18 @@ export interface CalloraRepository {
   createLeadNote(options: CreateLeadNoteOptions): Promise<LeadDetail | undefined>;
   createLeadFollowUp(options: CreateLeadFollowUpOptions): Promise<LeadDetail | undefined>;
   completeLeadFollowUp(options: CompleteLeadFollowUpOptions): Promise<LeadDetail | undefined>;
+  previewLeadImport(options: PreviewLeadImportOptions): Promise<LeadImportPreview>;
+  listLeadImports(options: LeadImportAccessOptions): Promise<LeadImportJob[]>;
+  findLeadImport(options: LeadImportAccessOptions & { jobId: string }): Promise<LeadImportPreview | undefined>;
+  commitLeadImport(options: CommitLeadImportOptions): Promise<LeadImportResult | undefined>;
+  listLeadAssignmentRules(options: LeadAssignmentOperationOptions): Promise<LeadAssignmentRule[]>;
+  createLeadAssignmentRule(options: CreateLeadAssignmentRuleOptions): Promise<LeadAssignmentRule | undefined>;
+  updateLeadAssignmentRule(options: UpdateLeadAssignmentRuleOptions): Promise<LeadAssignmentRule | undefined>;
+  dryRunLeadAssignmentRules(options: LeadAssignmentOperationOptions): Promise<LeadAssignmentDryRun>;
+  applyLeadAssignmentRules(options: ApplyLeadAssignmentRulesOptions): Promise<ApplyLeadAssignmentRulesResult>;
+  correctCallLeadLink(options: CorrectCallLeadLinkOptions): Promise<CorrectCallLeadLinkResult | undefined>;
+  applyMobileLeadUpdate(options: MobileLeadUpdateOptions): Promise<MobileLeadUpdateReceipt | undefined>;
+  getLeadReport(options: LeadReportOptions): Promise<LeadReport>;
   findDevice(organizationId: OrganizationId, deviceId: string): Promise<EmployeeDevice | undefined>;
   revokeDeviceByAdministrator(options: {
     organizationId: OrganizationId;
@@ -254,6 +286,59 @@ export interface CalloraRepository {
 
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+function zonedDateParts(at: string | number, timeZone: string): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(at));
+  const value = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find((part) => part.type === type)?.value);
+  return {
+    year: value("year"),
+    month: value("month"),
+    day: value("day"),
+    hour: value("hour"),
+    minute: value("minute"),
+    second: value("second"),
+  };
+}
+
+function zonedDateKey(at: string, timeZone: string): string {
+  const { year, month, day } = zonedDateParts(at, timeZone);
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function zonedMidnightIso(dateKey: string, timeZone: string): string {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const targetWallClock = Date.UTC(year!, month! - 1, day!);
+  let instant = targetWallClock;
+  // Resolve the zone offset at the target date. Repeating handles offset
+  // changes close to midnight without relying on the process time zone.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = zonedDateParts(instant, timeZone);
+    const representedWallClock = Date.UTC(
+      parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second,
+    );
+    const adjustment = targetWallClock - representedWallClock;
+    instant += adjustment;
+    if (adjustment === 0) break;
+  }
+  return new Date(instant).toISOString();
 }
 
 function seededOrganization(id: "org_alpha" | "org_beta", name: string, slug: string): Organization {
@@ -422,6 +507,27 @@ export class InMemoryCalloraRepository implements CalloraRepository {
   private readonly leadFollowUps = new Map<string, FollowUp>();
   private readonly leadActivities = new Map<string, LeadActivity>();
   private readonly leadIdByCallId = new Map<string, string>();
+  private readonly leadImports = new Map<string, LeadImportPreview>();
+  private readonly leadImportTeams = new Map<string, Set<string>>();
+  private readonly leadImportRowTeams = new Map<string, string>();
+  private readonly leadImportRuleIds = new Map<string, string>();
+  private readonly leadImportIdByRequest = new Map<string, string>();
+  private readonly leadImportFingerprints = new Map<string, string>();
+  private readonly leadImportCommitRequests = new Map<string, {
+    fingerprint: string;
+    jobId: string;
+    result: LeadImportResult;
+  }>();
+  private readonly leadAssignmentRules = new Map<string, LeadAssignmentRule>();
+  private readonly leadAssignmentRuleTeams = new Map<string, string>();
+  private readonly leadAssignmentRuleCursors = new Map<string, number>();
+  private readonly leadAssignmentApplyRequests = new Map<string, { fingerprint: string; result: ApplyLeadAssignmentRulesResult }>();
+  private readonly callLeadCorrectionRequests = new Map<string, { fingerprint: string; result: CorrectCallLeadLinkResult }>();
+  private readonly mobileLeadUpdateRequests = new Map<string, {
+    fingerprint: string;
+    leadId: string;
+    receipt: Pick<MobileLeadUpdateReceipt, "requestId" | "appliedLeadVersion">;
+  }>();
   private readonly devices = new Map<string, EmployeeDevice>();
   private readonly devicesByInstallation = new Map<string, string>();
   private readonly pairingCodesById = new Map<string, PairingCodeRecord>();
@@ -972,6 +1078,23 @@ export class InMemoryCalloraRepository implements CalloraRepository {
     };
   }
 
+  private firstLeadResponseSeconds(lead: Lead): number | undefined {
+    const createdAt = Date.parse(lead.createdAt);
+    let firstAnsweredAt: number | undefined;
+    for (const [callId, linkedLeadId] of this.leadIdByCallId) {
+      if (linkedLeadId !== lead.id) continue;
+      const call = this.calls.get(callId);
+      if (!call || call.organizationId !== lead.organizationId ||
+        call.disposition !== "answered" || call.answeredAt === undefined) continue;
+      const answeredAt = Date.parse(call.answeredAt);
+      // The active map reflects corrected links. Historical unlinked calls
+      // and calls answered before the lead existed do not define response.
+      if (answeredAt < createdAt) continue;
+      if (firstAnsweredAt === undefined || answeredAt < firstAnsweredAt) firstAnsweredAt = answeredAt;
+    }
+    return firstAnsweredAt === undefined ? undefined : Math.round((firstAnsweredAt - createdAt) / 1_000);
+  }
+
   private defaultLeadStatus(organizationId: OrganizationId): LeadStatus | undefined {
     return [...this.leadStatuses.values()]
       .filter((status) => status.organizationId === organizationId && status.isActive)
@@ -1293,6 +1416,809 @@ export class InMemoryCalloraRepository implements CalloraRepository {
       summary: "Follow-up completed",
     });
     return clone(this.buildLeadDetail(lead, options.at));
+  }
+
+  private canAccessTeam(scope: LeadAccessScope, team: string | undefined): boolean {
+    if (scope.kind === "organization") return true;
+    if (!team) return false;
+    if (scope.kind === "teams") return scope.teamNames.includes(team);
+    return this.employees.get(scope.employeeId)?.team === team;
+  }
+
+  private ruleMatchesLead(rule: LeadAssignmentRule, lead: Lead): boolean {
+    const conditions = rule.conditions;
+    if (conditions.sources?.length && !conditions.sources.includes(lead.source)) return false;
+    if (conditions.temperatures?.length &&
+      (!lead.temperature || !conditions.temperatures.includes(lead.temperature))) return false;
+    if (conditions.statusIds?.length && !conditions.statusIds.includes(lead.statusId)) return false;
+    return true;
+  }
+
+  private matchingRules(organizationId: OrganizationId, scope: LeadAccessScope, lead: Lead): LeadAssignmentRule[] {
+    const team = this.leadTeams.get(lead.id) ??
+      (lead.assignedEmployeeId ? this.employees.get(lead.assignedEmployeeId)?.team : undefined);
+    return [...this.leadAssignmentRules.values()]
+      .filter((rule) => rule.organizationId === organizationId && rule.active &&
+        this.leadAssignmentRuleTeams.get(rule.id) === team && this.canAccessTeam(scope, team) &&
+        rule.employeeIds.length > 0 && rule.employeeIds.every((employeeId) => {
+          const employee = this.employees.get(employeeId);
+          return employee?.organizationId === organizationId && employee.status === "active" && employee.team === team;
+        }) &&
+        this.ruleMatchesLead(rule, lead))
+      .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id));
+  }
+
+  async previewLeadImport(options: PreviewLeadImportOptions): Promise<LeadImportPreview> {
+    const requestKey = `${options.organizationId}:${options.input.requestId}`;
+    const existingId = this.leadImportIdByRequest.get(requestKey);
+    if (existingId) {
+      if (this.leadImportFingerprints.get(requestKey) !== options.requestFingerprint) {
+        throw conflict("The import request ID was already used with a different payload");
+      }
+      const existing = this.leadImports.get(existingId);
+      if (!existing) throw new Error("In-memory lead import request is corrupt");
+      if (!this.canAccessImport(options, existing)) {
+        throw forbidden("The lead import is outside your current lead scope");
+      }
+      return clone({ ...existing, replayed: true });
+    }
+
+    const rows: LeadImportPreview["rows"] = [];
+    const phones = new Map<string, number>();
+    const importTeams = new Set<string>();
+    const ruleCursors = new Map<string, number>();
+    const rowTeams = new Map<number, string>();
+    const rowRuleIds = new Map<number, string>();
+    const activeEmployees = [...this.employees.values()].filter((employee) =>
+      employee.organizationId === options.organizationId && employee.status === "active" &&
+      this.canAccessTeam(options.scope, employee.team));
+    const defaultEmployee = activeEmployees
+      .filter((employee) => employee.team)
+      .sort((left, right) => (left.team ?? "").localeCompare(right.team ?? "") || left.id.localeCompare(right.id))[0];
+
+    for (const [index, rawInput] of options.input.rows.entries()) {
+      const input = clone(rawInput);
+      const rowNumber = index + 1;
+      const issues: LeadImportPreview["rows"][number]["issues"] = [];
+      const firstName = typeof input.firstName === "string" ? input.firstName.trim() : "";
+      const phoneNumber = typeof input.phoneNumber === "string" ? input.phoneNumber.trim() : "";
+      const validPhone = /^\+[1-9]\d{7,14}$/.test(phoneNumber);
+      if (!firstName) issues.push({ field: "firstName", code: "required", message: "First name is required" });
+      if (!validPhone) issues.push({ field: "phoneNumber", code: "invalid_phone", message: "Phone must use E.164 format" });
+      if (input.email !== undefined && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email.trim())) {
+        issues.push({ field: "email", code: "invalid_email", message: "Email is invalid" });
+      }
+      if (input.source !== undefined && !isLeadSource(input.source)) {
+        issues.push({ field: "source", code: "invalid_source", message: "Lead source is invalid" });
+      }
+
+      const status = input.statusName
+        ? [...this.leadStatuses.values()].find((candidate) => candidate.organizationId === options.organizationId &&
+          candidate.isActive && candidate.name.toLocaleLowerCase() === input.statusName!.trim().toLocaleLowerCase())
+        : this.defaultLeadStatus(options.organizationId);
+      if (!status) issues.push({ field: "statusName", code: "unknown_status", message: "Lead status was not found" });
+
+      const explicitOwner = input.assignedEmployeeCode
+        ? activeEmployees.find((employee) => employee.employeeCode?.toLocaleLowerCase() ===
+          input.assignedEmployeeCode!.trim().toLocaleLowerCase())
+        : undefined;
+      if (input.assignedEmployeeCode && !explicitOwner) {
+        issues.push({ field: "assignedEmployeeCode", code: "unknown_owner", message: "Active owner was not found" });
+      }
+      const team = explicitOwner?.team ?? defaultEmployee?.team;
+      if (!team) issues.push({ field: "assignedEmployeeCode", code: "unknown_owner", message: "No accessible team is available" });
+
+      const alternatePhoneNumber = input.alternatePhoneNumber?.trim();
+      const validAlternatePhone = alternatePhoneNumber !== undefined && /^\+[1-9]\d{7,14}$/.test(alternatePhoneNumber);
+      if (alternatePhoneNumber !== undefined && !validAlternatePhone) {
+        issues.push({ field: "alternatePhoneNumber", code: "invalid_phone",
+          message: "Alternate phone must use E.164 format" });
+      }
+      let duplicateRow: number | undefined;
+      for (const [field, candidate] of [
+        ["phoneNumber", validPhone ? phoneNumber : undefined],
+        ["alternatePhoneNumber", validAlternatePhone ? alternatePhoneNumber : undefined],
+      ] as const) {
+        if (!candidate) continue;
+        const phoneKey = `${team ?? "unresolved"}:${candidate}`;
+        const priorRow = phones.get(phoneKey);
+        if (priorRow !== undefined) {
+          duplicateRow ??= priorRow;
+          issues.push({ field, code: "duplicate_in_file", message: `Duplicates row ${priorRow}` });
+        } else if (field === "alternatePhoneNumber" && candidate === phoneNumber) {
+          issues.push({ field, code: "duplicate_in_file", message: "Duplicates phoneNumber in this row" });
+        }
+      }
+      const candidatePhones = [validPhone ? phoneNumber : undefined,
+        validAlternatePhone ? alternatePhoneNumber : undefined].filter((value): value is string => Boolean(value));
+      const invalidBeforeDuplicateLookup = issues.some((issue) =>
+        !["duplicate_in_file", "duplicate_existing"].includes(issue.code));
+      const duplicateLead = !invalidBeforeDuplicateLookup && duplicateRow === undefined &&
+        !issues.some((issue) => issue.code === "duplicate_in_file") &&
+        candidatePhones.length > 0 && team ? [...this.leads.values()].find((lead) =>
+        lead.organizationId === options.organizationId && !lead.archivedAt &&
+        this.leadTeams.get(lead.id) === team &&
+        candidatePhones.some((candidate) => lead.phoneNumber === candidate ||
+          lead.alternatePhoneNumber === candidate)) : undefined;
+      if (duplicateLead) {
+        issues.push({ field: "phoneNumber", code: "duplicate_existing", message: "An existing lead has this phone" });
+      }
+
+      const duplicate = Boolean(duplicateRow || duplicateLead ||
+        issues.some((issue) => issue.code === "duplicate_in_file"));
+      const invalid = issues.some((issue) => !["duplicate_in_file", "duplicate_existing"].includes(issue.code));
+      if (!invalid && !duplicate) {
+        phones.set(`${team ?? "unresolved"}:${phoneNumber}`, rowNumber);
+        if (validAlternatePhone && alternatePhoneNumber) {
+          phones.set(`${team ?? "unresolved"}:${alternatePhoneNumber}`, rowNumber);
+        }
+      }
+      let proposedOwner = explicitOwner;
+      if (!invalid && !duplicate && !proposedOwner && status && team &&
+        issues.every((issue) => issue.code !== "unknown_owner")) {
+        const proposed: Lead = {
+          id: `preview:${rowNumber}`,
+          organizationId: options.organizationId,
+          firstName: firstName || "Invalid",
+          phoneNumber: validPhone ? phoneNumber : "+10000000000",
+          source: input.source ?? "csv_import",
+          statusId: status.id,
+          tagIds: [],
+          customFields: {},
+          version: 1,
+          createdAt: options.at,
+          updatedAt: options.at,
+        };
+        this.leadTeams.set(proposed.id, team);
+        const rule = this.matchingRules(options.organizationId, options.scope, proposed)[0];
+        this.leadTeams.delete(proposed.id);
+        if (rule) {
+          const cursor = ruleCursors.get(rule.id) ?? this.leadAssignmentRuleCursors.get(rule.id) ?? 0;
+          const position = rule.strategy === "fixed_owner" ? 0 : cursor % rule.employeeIds.length;
+          proposedOwner = this.employees.get(rule.employeeIds[position] ?? "");
+          if (proposedOwner) {
+            rowRuleIds.set(rowNumber, rule.id);
+            if (rule.strategy === "round_robin") ruleCursors.set(rule.id, cursor + 1);
+          }
+        }
+      }
+
+      if (team) {
+        importTeams.add(team);
+        rowTeams.set(rowNumber, team);
+      }
+      rows.push({
+        rowNumber,
+        decision: invalid ? "invalid" : duplicate ? "duplicate" : "valid",
+        input,
+        issues,
+        ...(duplicateLead === undefined ? {} : { duplicateLeadId: duplicateLead.id }),
+        ...(proposedOwner === undefined ? {} : { proposedAssignedEmployeeId: proposedOwner.id }),
+      });
+    }
+
+    const job: LeadImportJob = {
+      id: this.ids.next("lead_import"),
+      organizationId: options.organizationId,
+      fileName: options.input.fileName,
+      status: "preview_ready",
+      totalRows: rows.length,
+      validRows: rows.filter((row) => row.decision === "valid").length,
+      duplicateRows: rows.filter((row) => row.decision === "duplicate").length,
+      errorRows: rows.filter((row) => row.decision === "invalid").length,
+      importedRows: 0,
+      processedRows: rows.filter((row) => row.decision !== "valid").length,
+      createdByUserId: options.actorUserId,
+      createdAt: options.at,
+      updatedAt: options.at,
+      errorDownloadAvailable: rows.some((row) => row.issues.length > 0),
+    };
+    const preview: LeadImportPreview = { job, rows, replayed: false };
+    this.leadImports.set(job.id, clone(preview));
+    this.leadImportTeams.set(job.id, importTeams);
+    for (const [rowNumber, team] of rowTeams) {
+      this.leadImportRowTeams.set(`${job.id}:${rowNumber}`, team);
+    }
+    for (const [rowNumber, ruleId] of rowRuleIds) {
+      this.leadImportRuleIds.set(`${job.id}:${rowNumber}`, ruleId);
+    }
+    this.leadImportIdByRequest.set(requestKey, job.id);
+    this.leadImportFingerprints.set(requestKey, options.requestFingerprint);
+    return clone(preview);
+  }
+
+  private canAccessImport(options: LeadImportAccessOptions, preview: LeadImportPreview): boolean {
+    if (preview.job.organizationId !== options.organizationId) return false;
+    if (options.scope.kind === "organization") return true;
+    if (preview.job.createdByUserId !== options.actorUserId) return false;
+    const teams = this.leadImportTeams.get(preview.job.id) ?? new Set<string>();
+    return [...teams].every((team) => this.canAccessTeam(options.scope, team));
+  }
+
+  async listLeadImports(options: LeadImportAccessOptions): Promise<LeadImportJob[]> {
+    return clone([...this.leadImports.values()]
+      .filter((preview) => this.canAccessImport(options, preview))
+      .map((preview) => preview.job)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)));
+  }
+
+  async findLeadImport(options: LeadImportAccessOptions & { jobId: string }): Promise<LeadImportPreview | undefined> {
+    const preview = this.leadImports.get(options.jobId);
+    return preview && this.canAccessImport(options, preview) ? clone(preview) : undefined;
+  }
+
+  async commitLeadImport(options: CommitLeadImportOptions): Promise<LeadImportResult | undefined> {
+    const preview = this.leadImports.get(options.jobId);
+    if (!preview || !this.canAccessImport(options, preview)) return undefined;
+    const requestKey = `${options.organizationId}:${options.input.requestId}`;
+    const prior = this.leadImportCommitRequests.get(requestKey);
+    if (prior) {
+      if (prior.fingerprint !== options.requestFingerprint || prior.jobId !== options.jobId) {
+        throw conflict("The import commit request ID was already used with a different payload");
+      }
+      return clone({ ...prior.result, replayed: true });
+    }
+    if (preview.job.status === "completed") {
+      const result = { job: clone(preview.job), replayed: true };
+      this.leadImportCommitRequests.set(requestKey, {
+        fingerprint: options.requestFingerprint,
+        jobId: options.jobId,
+        result,
+      });
+      return result;
+    }
+    preview.job.status = "processing";
+    preview.job.updatedAt = options.at;
+    const batch = preview.rows.filter((candidate) => candidate.decision === "valid").slice(0, 50);
+    const ruleCursors = new Map<string, number>();
+    const advancedRuleIds = new Set<string>();
+    for (const row of batch) {
+      const rowKey = `${preview.job.id}:${row.rowNumber}`;
+      const team = this.leadImportRowTeams.get(rowKey);
+      const candidatePhones = [row.input.phoneNumber.trim(), row.input.alternatePhoneNumber?.trim()]
+        .filter((value): value is string => Boolean(value));
+      const duplicateLead = team ? [...this.leads.values()].find((lead) =>
+        lead.organizationId === options.organizationId && !lead.archivedAt &&
+        this.leadTeams.get(lead.id) === team && candidatePhones.some((phone) =>
+          lead.phoneNumber === phone || lead.alternatePhoneNumber === phone)) : undefined;
+      if (duplicateLead) {
+        row.decision = "duplicate";
+        row.duplicateLeadId = duplicateLead.id;
+        row.issues.push({
+          field: "phoneNumber",
+          code: "duplicate_existing",
+          message: "An existing lead has this phone",
+        });
+        preview.job.duplicateRows += 1;
+        preview.job.validRows -= 1;
+        continue;
+      }
+      const status = row.input.statusName
+        ? [...this.leadStatuses.values()].find((candidate) => candidate.organizationId === options.organizationId &&
+          candidate.isActive && candidate.name.toLocaleLowerCase() === row.input.statusName!.trim().toLocaleLowerCase())
+        : this.defaultLeadStatus(options.organizationId);
+      if (!status) {
+        row.decision = "invalid";
+        row.issues.push({
+          field: "statusName",
+          code: "unknown_status",
+          message: "The staged lead status is no longer active",
+        });
+        preview.job.errorRows += 1;
+        preview.job.validRows -= 1;
+        continue;
+      }
+      let assignedEmployeeId = row.proposedAssignedEmployeeId;
+      const ruleId = this.leadImportRuleIds.get(rowKey);
+      let appliedRoundRobinCursor: number | undefined;
+      if (ruleId) {
+        const rule = this.leadAssignmentRules.get(ruleId);
+        const ruleTeam = this.leadAssignmentRuleTeams.get(ruleId);
+        const proposed: Lead = {
+          id: `commit:${preview.job.id}:${row.rowNumber}`,
+          organizationId: options.organizationId,
+          firstName: row.input.firstName.trim(),
+          phoneNumber: row.input.phoneNumber.trim(),
+          source: row.input.source ?? "csv_import",
+          statusId: status.id,
+          tagIds: [],
+          customFields: {},
+          version: 1,
+          createdAt: options.at,
+          updatedAt: options.at,
+        };
+        const eligible = rule && rule.active && team && ruleTeam === team &&
+          this.canAccessTeam(options.scope, team) && this.ruleMatchesLead(rule, proposed) &&
+          rule.employeeIds.length > 0 && rule.employeeIds.every((employeeId) => {
+            const employee = this.employees.get(employeeId);
+            return employee?.organizationId === options.organizationId &&
+              employee.status === "active" && employee.team === team;
+          });
+        if (!eligible || !rule) {
+          row.decision = "invalid";
+          row.issues.push({
+            field: "assignedEmployeeCode",
+            code: "unknown_owner",
+            message: "The assignment rule no longer has an eligible active owner",
+          });
+          preview.job.errorRows += 1;
+          preview.job.validRows -= 1;
+          continue;
+        }
+        const cursor = ruleCursors.get(ruleId) ?? this.leadAssignmentRuleCursors.get(ruleId) ?? 0;
+        assignedEmployeeId = rule.employeeIds[rule.strategy === "fixed_owner" ? 0 : cursor % rule.employeeIds.length];
+        if (!assignedEmployeeId) {
+          row.decision = "invalid";
+          row.issues.push({
+            field: "assignedEmployeeCode",
+            code: "unknown_owner",
+            message: "The assignment rule no longer has an eligible active owner",
+          });
+          preview.job.errorRows += 1;
+          preview.job.validRows -= 1;
+          continue;
+        }
+        if (rule.strategy === "round_robin") appliedRoundRobinCursor = cursor;
+      }
+      const detail = await this.createLead({
+        organizationId: options.organizationId,
+        scope: options.scope,
+        input: {
+          firstName: row.input.firstName.trim(),
+          phoneNumber: row.input.phoneNumber.trim(),
+          source: row.input.source ?? "csv_import",
+          sourceReference: `${preview.job.id}:${row.rowNumber}`,
+          ...(row.input.lastName === undefined ? {} : { lastName: row.input.lastName }),
+          ...(row.input.companyName === undefined ? {} : { companyName: row.input.companyName }),
+          ...(row.input.alternatePhoneNumber === undefined ? {} : { alternatePhoneNumber: row.input.alternatePhoneNumber }),
+          ...(row.input.email === undefined ? {} : { email: row.input.email }),
+          ...(status === undefined ? {} : { statusId: status.id }),
+          ...(assignedEmployeeId === undefined ? {} : { assignedEmployeeId }),
+          ...(row.input.tagNames === undefined ? {} : { tagIds: row.input.tagNames.map((tagName) => tagName.trim()) }),
+          ...(row.input.customFields === undefined ? {} : { customFields: row.input.customFields }),
+        },
+        actorUserId: options.actorUserId,
+        at: options.at,
+      });
+      if (!detail) {
+        row.decision = "invalid";
+        row.issues.push({ field: "assignedEmployeeCode", code: "unknown_owner", message: "Owner is no longer available" });
+        preview.job.errorRows += 1;
+        preview.job.validRows -= 1;
+      } else {
+        row.decision = "imported";
+        preview.job.importedRows += 1;
+        if (ruleId && appliedRoundRobinCursor !== undefined) {
+          ruleCursors.set(ruleId, appliedRoundRobinCursor + 1);
+          advancedRuleIds.add(ruleId);
+        }
+      }
+    }
+    for (const ruleId of advancedRuleIds) {
+      const cursor = ruleCursors.get(ruleId);
+      if (cursor === undefined) continue;
+      this.leadAssignmentRuleCursors.set(ruleId, cursor);
+      const rule = this.leadAssignmentRules.get(ruleId);
+      if (rule) {
+        rule.version += 1;
+        rule.updatedByUserId = options.actorUserId;
+        rule.updatedAt = options.at;
+      }
+    }
+    preview.job.processedRows = preview.rows.filter((row) => row.decision !== "valid").length;
+    const hasRemaining = preview.rows.some((row) => row.decision === "valid");
+    preview.job.status = hasRemaining ? "interrupted" : "completed";
+    if (!hasRemaining) preview.job.completedAt = options.at;
+    preview.job.updatedAt = options.at;
+    preview.job.errorDownloadAvailable = preview.rows.some((row) => row.issues.length > 0);
+    const result = { job: clone(preview.job), replayed: false };
+    this.leadImportCommitRequests.set(requestKey, {
+      fingerprint: options.requestFingerprint,
+      jobId: options.jobId,
+      result: clone(result),
+    });
+    return result;
+  }
+
+  async listLeadAssignmentRules(options: LeadAssignmentOperationOptions): Promise<LeadAssignmentRule[]> {
+    return clone([...this.leadAssignmentRules.values()]
+      .filter((rule) => rule.organizationId === options.organizationId &&
+        this.canAccessTeam(options.scope, this.leadAssignmentRuleTeams.get(rule.id)))
+      .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id)));
+  }
+
+  async createLeadAssignmentRule(options: CreateLeadAssignmentRuleOptions): Promise<LeadAssignmentRule | undefined> {
+    if (new Set(options.input.employeeIds).size !== options.input.employeeIds.length) return undefined;
+    const employees = options.input.employeeIds.map((id) => this.employees.get(id));
+    if (employees.some((employee) => !employee || employee.organizationId !== options.organizationId ||
+      employee.status !== "active" || !this.canAccessTeam(options.scope, employee.team))) return undefined;
+    const team = employees[0]?.team;
+    if (!team || employees.some((employee) => employee?.team !== team)) return undefined;
+    const rule: LeadAssignmentRule = {
+      id: this.ids.next("lead_assignment_rule"),
+      organizationId: options.organizationId,
+      name: options.input.name.trim(),
+      priority: options.input.priority,
+      active: options.input.active ?? true,
+      conditions: clone(options.input.conditions ?? {}),
+      strategy: options.input.strategy,
+      employeeIds: [...options.input.employeeIds],
+      version: 1,
+      createdByUserId: options.actorUserId,
+      updatedByUserId: options.actorUserId,
+      createdAt: options.at,
+      updatedAt: options.at,
+    };
+    this.leadAssignmentRules.set(rule.id, rule);
+    this.leadAssignmentRuleTeams.set(rule.id, team);
+    this.leadAssignmentRuleCursors.set(rule.id, 0);
+    return clone(rule);
+  }
+
+  async updateLeadAssignmentRule(options: UpdateLeadAssignmentRuleOptions): Promise<LeadAssignmentRule | undefined> {
+    const rule = this.leadAssignmentRules.get(options.ruleId);
+    if (!rule || rule.organizationId !== options.organizationId ||
+      !this.canAccessTeam(options.scope, this.leadAssignmentRuleTeams.get(rule.id))) return undefined;
+    if (rule.version !== options.input.expectedVersion) throw conflict("The assignment rule changed; refresh and retry");
+    const employeeIds = options.input.changes.employeeIds ?? rule.employeeIds;
+    if (new Set(employeeIds).size !== employeeIds.length) return undefined;
+    const employees = employeeIds.map((id) => this.employees.get(id));
+    const team = employees[0]?.team;
+    if (!team || employees.some((employee) => !employee || employee.organizationId !== options.organizationId ||
+      employee.status !== "active" || employee.team !== team || !this.canAccessTeam(options.scope, employee.team))) {
+      return undefined;
+    }
+    const strategy = options.input.changes.strategy ?? rule.strategy;
+    if (strategy === "fixed_owner" && employeeIds.length !== 1) return undefined;
+    const currentTeam = this.leadAssignmentRuleTeams.get(rule.id);
+    if (currentTeam !== team) {
+      throw conflict("Assignment rule team is immutable; create a new rule for another team");
+    }
+    if (options.input.changes.name !== undefined) rule.name = options.input.changes.name.trim();
+    if (options.input.changes.priority !== undefined) rule.priority = options.input.changes.priority;
+    if (options.input.changes.active !== undefined) rule.active = options.input.changes.active;
+    if (options.input.changes.conditions !== undefined) rule.conditions = clone(options.input.changes.conditions);
+    rule.strategy = strategy;
+    rule.employeeIds = [...employeeIds];
+    rule.updatedByUserId = options.actorUserId;
+    rule.updatedAt = options.at;
+    rule.version += 1;
+    this.leadAssignmentRuleTeams.set(rule.id, team);
+    return clone(rule);
+  }
+
+  async dryRunLeadAssignmentRules(options: LeadAssignmentOperationOptions): Promise<LeadAssignmentDryRun> {
+    const distribution = new Map<string, number>();
+    const ruleCursors = new Map<string, number>();
+    let matchedLeads = 0;
+    let unmatchedLeads = 0;
+    for (const lead of this.leads.values()) {
+      if (lead.organizationId !== options.organizationId || lead.archivedAt || lead.assignedEmployeeId ||
+        !this.canAccessLead(options.scope, lead)) continue;
+      const rule = this.matchingRules(options.organizationId, options.scope, lead)[0];
+      if (!rule) {
+        unmatchedLeads += 1;
+        continue;
+      }
+      matchedLeads += 1;
+      const cursor = ruleCursors.get(rule.id) ?? this.leadAssignmentRuleCursors.get(rule.id) ?? 0;
+      const index = rule.strategy === "fixed_owner" ? 0 : cursor % rule.employeeIds.length;
+      const employeeId = rule.employeeIds[index] ?? rule.employeeIds[0];
+      if (rule.strategy === "round_robin") ruleCursors.set(rule.id, cursor + 1);
+      if (employeeId) distribution.set(employeeId, (distribution.get(employeeId) ?? 0) + 1);
+    }
+    return {
+      matchedLeads,
+      unmatchedLeads,
+      distribution: [...distribution].map(([employeeId, leadCount]) => ({ employeeId, leadCount })),
+    };
+  }
+
+  async applyLeadAssignmentRules(options: ApplyLeadAssignmentRulesOptions): Promise<ApplyLeadAssignmentRulesResult> {
+    const key = `${options.organizationId}:${options.input.requestId}`;
+    const prior = this.leadAssignmentApplyRequests.get(key);
+    if (prior) {
+      if (prior.fingerprint !== options.requestFingerprint) {
+        throw conflict("The assignment request ID was already used with a different payload");
+      }
+      return clone({ ...prior.result, replayed: true });
+    }
+    const before = await this.dryRunLeadAssignmentRules(options);
+    let appliedLeads = 0;
+    const ruleCursors = new Map<string, number>();
+    const advancedRuleIds = new Set<string>();
+    if (options.input.includeExistingUnassigned) for (const lead of [...this.leads.values()]) {
+      if (lead.organizationId !== options.organizationId || lead.archivedAt || lead.assignedEmployeeId ||
+        !this.canAccessLead(options.scope, lead)) continue;
+      const rule = this.matchingRules(options.organizationId, options.scope, lead)[0];
+      if (!rule) continue;
+      const cursor = ruleCursors.get(rule.id) ?? this.leadAssignmentRuleCursors.get(rule.id) ?? 0;
+      const employeeId = rule.employeeIds[rule.strategy === "fixed_owner" ? 0 : cursor % rule.employeeIds.length];
+      if (!employeeId) continue;
+      const detail = await this.updateLead({
+        organizationId: options.organizationId,
+        scope: options.scope,
+        leadId: lead.id,
+        request: { expectedVersion: lead.version, changes: { assignedEmployeeId: employeeId } },
+        actorUserId: options.actorUserId,
+        canAssign: true,
+        at: options.at,
+      });
+      if (detail) {
+        appliedLeads += 1;
+        if (rule.strategy === "round_robin") {
+          ruleCursors.set(rule.id, cursor + 1);
+          advancedRuleIds.add(rule.id);
+        }
+      }
+    }
+    for (const ruleId of advancedRuleIds) {
+      const cursor = ruleCursors.get(ruleId);
+      if (cursor === undefined) continue;
+      this.leadAssignmentRuleCursors.set(ruleId, cursor);
+      const rule = this.leadAssignmentRules.get(ruleId);
+      if (rule) {
+        rule.version += 1;
+        rule.updatedByUserId = options.actorUserId;
+        rule.updatedAt = options.at;
+      }
+    }
+    const result = { ...before, requestId: options.input.requestId, replayed: false, appliedLeads };
+    this.leadAssignmentApplyRequests.set(key, { fingerprint: options.requestFingerprint, result: clone(result) });
+    return result;
+  }
+
+  async correctCallLeadLink(options: CorrectCallLeadLinkOptions): Promise<CorrectCallLeadLinkResult | undefined> {
+    const key = `${options.organizationId}:${options.input.requestId}`;
+    const prior = this.callLeadCorrectionRequests.get(key);
+    if (prior) {
+      if (prior.fingerprint !== options.requestFingerprint) {
+        throw conflict("The correction request ID was already used with a different payload");
+      }
+      return clone({ ...prior.result, replayed: true });
+    }
+    const call = this.calls.get(options.callId);
+    if (!call || call.organizationId !== options.organizationId) return undefined;
+    const currentLeadId = this.leadIdByCallId.get(call.id) ?? null;
+    if (currentLeadId !== options.input.expectedLeadId) throw conflict("The call link changed; refresh and retry");
+    const currentLead = currentLeadId ? this.leads.get(currentLeadId) : undefined;
+    const replacement = options.input.replacementLeadId ? this.leads.get(options.input.replacementLeadId) : undefined;
+    if (currentLead && !this.canAccessLead(options.scope, currentLead)) return undefined;
+    if (options.input.replacementLeadId && (!replacement || replacement.organizationId !== options.organizationId ||
+      replacement.archivedAt || !this.canAccessLead(options.scope, replacement))) return undefined;
+    const callTeam = this.employees.get(call.employeeId)?.team;
+    if (replacement && this.leadTeams.get(replacement.id) !== callTeam) return undefined;
+    if (currentLeadId) {
+      this.leadIdByCallId.delete(call.id);
+      const activityId = this.ids.next("lead_activity");
+      this.leadActivities.set(activityId, {
+        id: activityId,
+        organizationId: options.organizationId,
+        leadId: currentLeadId,
+        kind: "call_unlinked",
+        actorUserId: options.actorUserId,
+        callLogId: call.id,
+        occurredAt: options.at,
+        summary: "Call link corrected",
+        metadata: { reason: options.input.reason, requestId: options.input.requestId },
+      });
+    }
+    if (replacement) {
+      this.leadIdByCallId.set(call.id, replacement.id);
+      const activityId = this.ids.next("lead_activity");
+      this.leadActivities.set(activityId, {
+        id: activityId,
+        organizationId: options.organizationId,
+        leadId: replacement.id,
+        kind: "call_linked",
+        actorUserId: options.actorUserId,
+        callLogId: call.id,
+        occurredAt: options.at,
+        summary: "Call manually linked",
+        metadata: { reason: options.input.reason, requestId: options.input.requestId, linkSource: "manual" },
+      });
+    }
+    const result: CorrectCallLeadLinkResult = {
+      requestId: options.input.requestId,
+      callLogId: call.id,
+      previousLeadId: currentLeadId,
+      replacementLeadId: replacement?.id ?? null,
+      correctedAt: options.at,
+      replayed: false,
+    };
+    this.callLeadCorrectionRequests.set(key, { fingerprint: options.requestFingerprint, result: clone(result) });
+    return result;
+  }
+
+  async applyMobileLeadUpdate(options: MobileLeadUpdateOptions): Promise<MobileLeadUpdateReceipt | undefined> {
+    const key = `${options.context.organizationId}:${options.context.deviceId}:${options.input.requestId}`;
+    const current = this.findCurrentMobileCredential(options.context, "session", options.at);
+    if (!current || !this.isConsentCurrent(options.context.deviceId)) throw consentRequired();
+    const prior = this.mobileLeadUpdateRequests.get(key);
+    if (prior) {
+      if (prior.fingerprint !== options.requestFingerprint || prior.leadId !== options.leadId) {
+        throw conflict("The mobile update request ID was already used with a different payload");
+      }
+      return clone({
+        requestId: prior.receipt.requestId,
+        appliedLeadVersion: prior.receipt.appliedLeadVersion,
+        replayed: true,
+      });
+    }
+    const occurredAt = Date.parse(options.input.occurredAt);
+    const receivedAt = Date.parse(options.at);
+    if (occurredAt > receivedAt + 5 * 60 * 1_000 ||
+      occurredAt < receivedAt - 7 * 24 * 60 * 60 * 1_000) {
+      throw badRequest("occurredAt is outside the accepted offline update window", "occurredAt");
+    }
+    const lead = this.leads.get(options.leadId);
+    if (!lead || lead.organizationId !== options.context.organizationId ||
+      lead.archivedAt || lead.assignedEmployeeId !== options.context.employeeId) return undefined;
+    if (lead.version !== options.input.expectedLeadVersion) throw conflict("The lead changed; refresh and retry");
+    const employee = this.employees.get(options.context.employeeId);
+    const actorUserId = employee?.linkedUserId;
+    if (!actorUserId) return undefined;
+    const status = options.input.statusId ? this.leadStatuses.get(options.input.statusId) : undefined;
+    if (options.input.statusId && (!status || status.organizationId !== lead.organizationId || !status.isActive)) return undefined;
+    if (options.input.followUp?.reminderAt &&
+      Date.parse(options.input.followUp.reminderAt) > Date.parse(options.input.followUp.dueAt)) {
+      throw badRequest("The follow-up reminder cannot be after its due time", "followUp.reminderAt");
+    }
+    if (status) {
+      lead.statusId = status.id;
+      if (status.isWon) lead.convertedAt = options.at;
+      else delete lead.convertedAt;
+      if (status.isLost) lead.lostAt = options.at;
+      else delete lead.lostAt;
+      const activityId = this.ids.next("lead_activity");
+      this.leadActivities.set(activityId, {
+        id: activityId, organizationId: lead.organizationId, leadId: lead.id,
+        kind: "status_changed", actorEmployeeId: options.context.employeeId,
+        occurredAt: options.input.occurredAt, summary: `Status changed to ${status.name}`,
+        metadata: { requestId: options.input.requestId, deviceId: options.context.deviceId },
+      });
+    }
+    if (options.input.note) {
+      const noteId = this.ids.next("lead_note");
+      this.leadNotes.set(noteId, {
+        id: noteId, organizationId: lead.organizationId, leadId: lead.id,
+        authorUserId: actorUserId, body: options.input.note.body, isPinned: false,
+        createdAt: options.at, updatedAt: options.at, createdBy: actorUserId, updatedBy: actorUserId,
+      });
+      const activityId = this.ids.next("lead_activity");
+      this.leadActivities.set(activityId, {
+        id: activityId, organizationId: lead.organizationId, leadId: lead.id,
+        kind: "note_added", actorEmployeeId: options.context.employeeId,
+        occurredAt: options.input.occurredAt, summary: "Mobile note added",
+        metadata: { requestId: options.input.requestId, deviceId: options.context.deviceId, noteId },
+      });
+    }
+    if (options.input.followUp) {
+      const followUpId = this.ids.next("follow_up");
+      this.leadFollowUps.set(followUpId, {
+        id: followUpId, organizationId: lead.organizationId, leadId: lead.id,
+        assignedEmployeeId: options.context.employeeId, title: options.input.followUp.title,
+        ...(options.input.followUp.notes === undefined ? {} : { notes: options.input.followUp.notes }),
+        dueAt: options.input.followUp.dueAt,
+        ...(options.input.followUp.reminderAt === undefined ? {} : { reminderAt: options.input.followUp.reminderAt }),
+        priority: options.input.followUp.priority ?? "normal", status: "pending", version: 1,
+        createdAt: options.at, updatedAt: options.at, createdBy: actorUserId, updatedBy: actorUserId,
+      });
+      if (!lead.nextFollowUpAt || options.input.followUp.dueAt < lead.nextFollowUpAt) {
+        lead.nextFollowUpAt = options.input.followUp.dueAt;
+      }
+      const activityId = this.ids.next("lead_activity");
+      this.leadActivities.set(activityId, {
+        id: activityId, organizationId: lead.organizationId, leadId: lead.id,
+        kind: "follow_up_created", actorEmployeeId: options.context.employeeId,
+        occurredAt: options.input.occurredAt, summary: "Mobile follow-up scheduled",
+        metadata: { requestId: options.input.requestId, deviceId: options.context.deviceId, followUpId },
+      });
+    }
+    lead.version += 1;
+    lead.updatedAt = options.at;
+    lead.updatedBy = actorUserId;
+    const receipt: MobileLeadUpdateReceipt = {
+      requestId: options.input.requestId,
+      replayed: false,
+      appliedLeadVersion: lead.version,
+      detail: clone(this.buildLeadDetail(lead, options.at)),
+    };
+    this.mobileLeadUpdateRequests.set(key, {
+      fingerprint: options.requestFingerprint,
+      leadId: options.leadId,
+      receipt: {
+        requestId: receipt.requestId,
+        appliedLeadVersion: receipt.appliedLeadVersion,
+      },
+    });
+    return receipt;
+  }
+
+  async getLeadReport(options: LeadReportOptions): Promise<LeadReport> {
+    const cohort = [...this.leads.values()].filter((lead) => lead.organizationId === options.organizationId &&
+      !lead.archivedAt && this.canAccessLead(options.scope, lead) &&
+      lead.createdAt >= options.filter.from && lead.createdAt < options.filter.to &&
+      (!options.filter.employeeId || lead.assignedEmployeeId === options.filter.employeeId) &&
+      (!options.filter.team || this.leadTeams.get(lead.id) === options.filter.team) &&
+      (!options.filter.source || lead.source === options.filter.source));
+    const total = cohort.length;
+    const percentage = (value: number): number => total === 0 ? 0 : Math.round(value * 10_000 / total) / 100;
+    const responseSeconds = new Map(cohort.map((lead) => [lead.id, this.firstLeadResponseSeconds(lead)]));
+    const averageResponse = (leads: Lead[]): number | undefined => {
+      const values = leads.map((lead) => responseSeconds.get(lead.id))
+        .filter((value): value is number => value !== undefined);
+      return values.length === 0
+        ? undefined
+        : Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+    };
+    const converted = cohort.filter((lead) => Boolean(lead.convertedAt)).length;
+    const pipeline = [...this.leadStatuses.values()]
+      .filter((status) => status.organizationId === options.organizationId && status.isActive)
+      .sort((left, right) => left.position - right.position)
+      .map((status) => {
+        const leadCount = cohort.filter((lead) => lead.statusId === status.id).length;
+        return { statusId: status.id, statusName: status.name, color: status.color, leadCount,
+          percentageOfTotal: percentage(leadCount), isWon: status.isWon, isLost: status.isLost };
+      });
+    const employeeIds = new Set(cohort.map((lead) => lead.assignedEmployeeId).filter((id): id is string => Boolean(id)));
+    const ownerIds: Array<string | null> = [null, ...employeeIds];
+    const owners = ownerIds.map((employeeId) => {
+      const leads = cohort.filter((lead) => (lead.assignedEmployeeId ?? null) === employeeId);
+      const won = leads.filter((lead) => Boolean(lead.convertedAt)).length;
+      const employee = employeeId ? this.employees.get(employeeId) : undefined;
+      const ownerAverageResponse = averageResponse(leads);
+      return {
+        employeeId,
+        displayName: employee?.displayName ?? "Unassigned",
+        assigned: leads.length,
+        contacted: leads.filter((lead) => Boolean(lead.lastContactedAt)).length,
+        won,
+        conversionRate: leads.length === 0 ? 0 : Math.round(won * 10_000 / leads.length) / 100,
+        overdueFollowUps: leads.reduce((sum, lead) => sum + this.buildLeadListItem(lead, options.at).overdueFollowUpCount, 0),
+        ...(ownerAverageResponse === undefined ? {} : { averageResponseSeconds: ownerAverageResponse }),
+      };
+    });
+    const sourceValues = [...new Set(cohort.map((lead) => lead.source))];
+    const sources = sourceValues.map((source) => {
+      const leads = cohort.filter((lead) => lead.source === source);
+      const won = leads.filter((lead) => Boolean(lead.convertedAt)).length;
+      return { source, leads: leads.length, contacted: leads.filter((lead) => Boolean(lead.lastContactedAt)).length,
+        qualified: leads.filter((lead) => this.statusForLead(lead).name.toLocaleLowerCase() === "qualified").length,
+        won, conversionRate: leads.length === 0 ? 0 : Math.round(won * 10_000 / leads.length) / 100,
+        percentageOfTotal: percentage(leads.length) };
+    });
+    const buckets = new Map<string, { created: number; won: number }>();
+    for (const lead of cohort) {
+      const day = zonedDateKey(lead.createdAt, options.timeZone);
+      const bucket = buckets.get(day) ?? { created: 0, won: 0 };
+      bucket.created += 1;
+      if (lead.convertedAt) bucket.won += 1;
+      buckets.set(day, bucket);
+    }
+    const cohortAverageResponse = averageResponse(cohort);
+    return {
+      filter: clone(options.filter),
+      kpis: {
+        totalLeads: total,
+        convertedLeads: converted,
+        conversionRate: percentage(converted),
+        followUpsDue: cohort.reduce((sum, lead) => sum + this.followUpsForLead(options.organizationId, lead.id)
+          .filter((followUp) => followUp.status === "pending" && followUp.dueAt <= options.at).length, 0),
+        ...(cohortAverageResponse === undefined
+          ? {}
+          : { averageFirstResponseSeconds: cohortAverageResponse }),
+      },
+      pipeline,
+      trend: [...buckets].sort(([left], [right]) => left.localeCompare(right)).map(([day, values]) => ({
+        bucketStart: zonedMidnightIso(day, options.timeZone), ...values,
+      })),
+      owners,
+      sources,
+      generatedAt: options.at,
+      timeZone: options.timeZone,
+      metricDefinitionVersion: "2026-07-15",
+    };
   }
 
   async findDevice(organizationId: OrganizationId, deviceId: string): Promise<EmployeeDevice | undefined> {

@@ -1,12 +1,27 @@
 import type {
   AdminDeviceRevocationInput,
   AdminDeviceRevocationResult,
+  ApplyLeadAssignmentRulesInput,
+  ApplyLeadAssignmentRulesResult,
   CompleteFollowUpInput,
+  CommitLeadImportInput,
+  CorrectCallLeadLinkInput,
+  CorrectCallLeadLinkResult,
+  CreateLeadAssignmentRuleInput,
   CreateEmployeeInput,
   DashboardSummary,
   Employee,
   EmployeePerformanceRow,
+  LeadAssignmentDryRun,
+  LeadAssignmentRule,
+  LeadImportJob,
+  LeadImportPreview,
+  LeadImportResult,
+  LeadReport,
+  LeadReportFilter,
   Permission,
+  PreviewLeadImportInput,
+  UpdateLeadAssignmentRuleInput,
 } from '@callora/contracts'
 import type {
   CreateLeadFollowUpRequest,
@@ -98,6 +113,19 @@ export interface WorkspaceSessionData {
   organizationName: string
   role: DevRole
   permissions: Permission[]
+}
+
+export interface LeadImportJobListData {
+  items: LeadImportJob[]
+}
+
+export interface LeadAssignmentRuleListData {
+  items: LeadAssignmentRule[]
+}
+
+export interface DownloadedFile {
+  blob: Blob
+  fileName: string
 }
 
 interface ApiSuccessEnvelope<T> {
@@ -368,6 +396,135 @@ export class CalloraApiClient {
     })
   }
 
+  previewLeadImport(
+    input: PreviewLeadImportInput,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadImportPreview> {
+    return this.request('/v1/lead-imports/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      headers: { 'Idempotency-Key': input.requestId },
+      accessToken,
+      signal,
+    })
+  }
+
+  getLeadImportJobs(accessToken: string, signal?: AbortSignal): Promise<LeadImportJobListData> {
+    return this.request('/v1/lead-imports', { accessToken, signal })
+  }
+
+  getLeadImport(jobId: string, accessToken: string, signal?: AbortSignal): Promise<LeadImportPreview> {
+    return this.request(`/v1/lead-imports/${encodeURIComponent(jobId)}`, { accessToken, signal })
+  }
+
+  commitLeadImport(
+    jobId: string,
+    input: CommitLeadImportInput,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadImportResult> {
+    return this.request(`/v1/lead-imports/${encodeURIComponent(jobId)}/commit`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+      headers: { 'Idempotency-Key': input.requestId },
+      accessToken,
+      signal,
+    })
+  }
+
+  downloadLeadImportErrors(
+    jobId: string,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<DownloadedFile> {
+    return this.requestFile(`/v1/lead-imports/${encodeURIComponent(jobId)}/errors`, {
+      accessToken,
+      signal,
+    }, `${jobId}-errors.csv`)
+  }
+
+  getLeadAssignmentRules(accessToken: string, signal?: AbortSignal): Promise<LeadAssignmentRuleListData> {
+    return this.request('/v1/lead-assignment-rules', { accessToken, signal })
+  }
+
+  createLeadAssignmentRule(
+    input: CreateLeadAssignmentRuleInput,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadAssignmentRule> {
+    return this.request('/v1/lead-assignment-rules', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      accessToken,
+      signal,
+    })
+  }
+
+  updateLeadAssignmentRule(
+    ruleId: string,
+    input: UpdateLeadAssignmentRuleInput,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadAssignmentRule> {
+    return this.request(`/v1/lead-assignment-rules/${encodeURIComponent(ruleId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+      accessToken,
+      signal,
+    })
+  }
+
+  dryRunLeadAssignmentRules(accessToken: string, signal?: AbortSignal): Promise<LeadAssignmentDryRun> {
+    return this.request('/v1/lead-assignment-rules/dry-run', {
+      method: 'POST',
+      body: JSON.stringify({}),
+      accessToken,
+      signal,
+    })
+  }
+
+  applyLeadAssignmentRules(
+    input: ApplyLeadAssignmentRulesInput,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<ApplyLeadAssignmentRulesResult> {
+    return this.request('/v1/lead-assignment-rules/apply', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      headers: { 'Idempotency-Key': input.requestId },
+      accessToken,
+      signal,
+    })
+  }
+
+  correctCallLeadLink(
+    callLogId: string,
+    input: CorrectCallLeadLinkInput,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<CorrectCallLeadLinkResult> {
+    return this.request(`/v1/calls/${encodeURIComponent(callLogId)}/lead-link/correct`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+      headers: { 'Idempotency-Key': input.requestId },
+      accessToken,
+      signal,
+    })
+  }
+
+  getLeadReport(
+    query: LeadReportFilter,
+    accessToken: string,
+    signal?: AbortSignal,
+  ): Promise<LeadReport> {
+    const search = new URLSearchParams({ from: query.from, to: query.to })
+    if (query.employeeId) search.set('employeeId', query.employeeId)
+    if (query.team) search.set('team', query.team)
+    if (query.source) search.set('source', query.source)
+    return this.request(`/v1/lead-reports?${search.toString()}`, { accessToken, signal })
+  }
+
   revokeDevice(
     deviceId: string,
     input: AdminDeviceRevocationInput,
@@ -421,6 +578,44 @@ export class CalloraApiClient {
     // The production API uses ApiSuccess envelopes. Accepting a direct body keeps
     // local mocks and incremental backend migrations backwards compatible.
     return isApiSuccess<T>(payload) ? payload.data : payload as T
+  }
+
+  private async requestFile(
+    path: string,
+    options: RequestInit & { accessToken: string },
+    fallbackFileName: string,
+  ): Promise<DownloadedFile> {
+    const { accessToken, ...requestOptions } = options
+    const headers = new Headers(requestOptions.headers)
+    headers.set('Accept', 'text/csv')
+    headers.set('Authorization', `Bearer ${accessToken}`)
+    const response = await this.fetcher(`${this.baseUrl}${path}`, {
+      ...requestOptions,
+      credentials: 'omit',
+      headers,
+    })
+    if (!response.ok) {
+      let message = `The download failed with status ${response.status}.`
+      try {
+        const payload = await response.json() as unknown
+        if (isApiFailure(payload) && typeof payload.error.message === 'string') message = payload.error.message
+      } catch {
+        // A non-JSON error body is intentionally reduced to the status message.
+      }
+      throw new ApiRequestError(message, response.status)
+    }
+    const disposition = response.headers.get('Content-Disposition')
+    const encodedName = disposition?.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+    const quotedName = disposition?.match(/filename="([^"]+)"/i)?.[1]
+    let fileName = quotedName ?? fallbackFileName
+    if (encodedName) {
+      try {
+        fileName = decodeURIComponent(encodedName)
+      } catch {
+        fileName = fallbackFileName
+      }
+    }
+    return { blob: await response.blob(), fileName }
   }
 }
 

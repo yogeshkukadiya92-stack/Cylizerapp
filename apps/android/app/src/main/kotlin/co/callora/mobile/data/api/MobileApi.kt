@@ -75,6 +75,13 @@ interface MobileApi {
         search: String? = null,
     ): AssignedLeadPage
 
+    suspend fun listLeadStatuses(credentials: DeviceCredentials): List<MobileLeadStatus>
+
+    suspend fun submitLeadUpdate(
+        credentials: DeviceCredentials,
+        command: LeadUpdateCommand,
+    ): LeadUpdateReceipt
+
     suspend fun prepareSessionRotation(
         credentials: DeviceCredentials,
         requestId: String,
@@ -98,6 +105,7 @@ object MobileRoutes {
     const val HEARTBEAT = "/v1/mobile/heartbeat"
     const val CALL_BATCHES = "/v1/mobile/call-batches"
     const val LEADS = "/v1/mobile/leads"
+    const val LEAD_STATUSES = "/v1/mobile/lead-statuses"
     const val ROTATION_PREPARE = "/v1/mobile/session/rotation/prepare"
     const val ROTATION_CONFIRM = "/v1/mobile/session/rotation/confirm"
     const val REVOKE_SESSION = "/v1/mobile/session"

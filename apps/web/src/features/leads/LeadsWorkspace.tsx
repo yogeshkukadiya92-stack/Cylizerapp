@@ -3,12 +3,15 @@ import type { AuthSession } from '../../auth/types'
 import type { AuthorizationFailure } from '../../auth/useAuth'
 import { AddLeadDialog } from './AddLeadDialog'
 import { AddNoteDialog } from './AddNoteDialog'
+import { CallLinkCorrectionDialog } from './CallLinkCorrectionDialog'
 import { FollowUpDialog } from './FollowUpDialog'
+import { LeadOperationsDialog, type LeadOperationsTab } from './LeadOperationsDialog'
 import { LeadsPage } from './LeadsPage'
 import type {
   CreateLeadFollowUpRequest,
   CreateLeadRequest,
   LeadQueueFilter,
+  LeadTimelineItem,
   LeadUpdateRequest,
 } from './types'
 import { useDebouncedValue } from './useDebouncedValue'
@@ -39,6 +42,8 @@ export function LeadsWorkspace({
   const [isAddNoteOpen, setAddNoteOpen] = useState(false)
   const [isFollowUpOpen, setFollowUpOpen] = useState(false)
   const [isDetailOpen, setDetailOpen] = useState(true)
+  const [operationsTab, setOperationsTab] = useState<LeadOperationsTab | null>(null)
+  const [correctionItem, setCorrectionItem] = useState<LeadTimelineItem | null>(null)
   const debouncedSearch = useDebouncedValue(searchQuery.trim(), 250)
   const leadData = useLeadData({
     authSession,
@@ -123,9 +128,12 @@ export function LeadsWorkspace({
         isDetailOpen={isDetailOpen}
         leads={leadData.leads}
         onAddLead={() => setAddLeadOpen(true)}
+        onImportCsv={() => setOperationsTab('imports')}
+        onManageAssignmentRules={() => setOperationsTab('rules')}
         onAddNote={() => setAddNoteOpen(true)}
         onCloseDetail={() => setDetailOpen(false)}
         onCompleteFollowUp={completeFollowUp}
+        onCorrectCallLink={setCorrectionItem}
         onOwnerChange={setOwnerId}
         onQueueChange={setQueue}
         onScheduleFollowUp={() => setFollowUpOpen(true)}
@@ -157,6 +165,30 @@ export function LeadsWorkspace({
         owners={leadData.owners}
         statuses={leadData.statuses}
       />
+      {operationsTab ? (
+        <LeadOperationsDialog
+          authSession={authSession}
+          initialTab={operationsTab}
+          isLive={leadData.dataSource.status === 'live'}
+          onChanged={leadData.refresh}
+          onClose={() => setOperationsTab(null)}
+          onNotify={onNotify}
+          owners={leadData.owners}
+          permissions={leadData.permissions}
+          statuses={leadData.statuses}
+        />
+      ) : null}
+      {correctionItem?.callLogId && leadData.selectedDetail ? (
+        <CallLinkCorrectionDialog
+          authSession={authSession}
+          currentLeadId={leadData.selectedDetail.lead.id}
+          currentLeadName={leadData.selectedDetail.lead.displayName}
+          item={correctionItem}
+          onClose={() => setCorrectionItem(null)}
+          onCompleted={leadData.refresh}
+          onNotify={onNotify}
+        />
+      ) : null}
       {isAddNoteOpen && leadData.selectedDetail ? (
         <AddNoteDialog
           isDemo={leadData.dataSource.status === 'demo'}

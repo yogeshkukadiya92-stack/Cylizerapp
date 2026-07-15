@@ -21,6 +21,24 @@ import type {
   LeadQueueKey,
   LeadQueueSummary,
   LeadStatus,
+  LeadAssignmentDryRun,
+  LeadAssignmentRule,
+  LeadImportJob,
+  LeadImportPreview,
+  LeadImportPreviewRow,
+  LeadImportResult,
+  LeadReport,
+  MobileLeadUpdateInput,
+  MobileLeadUpdateReceipt,
+  PreviewLeadImportInput,
+  CommitLeadImportInput,
+  CreateLeadAssignmentRuleInput,
+  UpdateLeadAssignmentRuleInput,
+  ApplyLeadAssignmentRulesInput,
+  ApplyLeadAssignmentRulesResult,
+  CorrectCallLeadLinkInput,
+  CorrectCallLeadLinkResult,
+  LeadReportFilter,
   OrganizationId,
   Permission,
   SystemRoleKey,
@@ -51,7 +69,8 @@ export interface AuditEvent {
   actorDeviceId?: string;
   requestId?: string;
   action: string;
-  entityType: "employee" | "device" | "pairing_code" | "call" | "session" | "lead" | "follow_up";
+  entityType: "employee" | "device" | "pairing_code" | "call" | "session" | "lead" | "follow_up" |
+    "lead_import" | "assignment_rule" | "call_lead_link";
   entityId: string;
   occurredAt: IsoDateTime;
   metadata: Record<string, JsonValue>;
@@ -179,6 +198,96 @@ export interface CompleteLeadFollowUpOptions {
 export type LeadWorkspaceDetail = LeadDetail;
 export type LeadPipelineStatus = LeadStatus;
 
+export interface PreviewLeadImportOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  input: PreviewLeadImportInput;
+  actorUserId: string;
+  requestFingerprint: string;
+  at: IsoDateTime;
+}
+
+export interface LeadImportAccessOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  actorUserId: string;
+}
+
+export interface CommitLeadImportOptions extends LeadImportAccessOptions {
+  jobId: string;
+  input: CommitLeadImportInput;
+  requestFingerprint: string;
+  at: IsoDateTime;
+}
+
+export interface CreateLeadAssignmentRuleOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  input: CreateLeadAssignmentRuleInput;
+  actorUserId: string;
+  at: IsoDateTime;
+}
+
+export interface UpdateLeadAssignmentRuleOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  ruleId: string;
+  input: UpdateLeadAssignmentRuleInput;
+  actorUserId: string;
+  at: IsoDateTime;
+}
+
+export interface LeadAssignmentOperationOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  actorUserId: string;
+  at: IsoDateTime;
+}
+
+export interface ApplyLeadAssignmentRulesOptions extends LeadAssignmentOperationOptions {
+  input: ApplyLeadAssignmentRulesInput;
+  requestFingerprint: string;
+}
+
+export interface CorrectCallLeadLinkOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  callId: string;
+  input: CorrectCallLeadLinkInput;
+  actorUserId: string;
+  requestFingerprint: string;
+  at: IsoDateTime;
+}
+
+export interface MobileLeadUpdateOptions {
+  context: MobileDeviceContext;
+  leadId: string;
+  input: MobileLeadUpdateInput;
+  requestFingerprint: string;
+  at: IsoDateTime;
+}
+
+export interface LeadReportOptions {
+  organizationId: OrganizationId;
+  scope: LeadAccessScope;
+  filter: LeadReportFilter;
+  timeZone: string;
+  at: IsoDateTime;
+}
+
+export type {
+  ApplyLeadAssignmentRulesResult,
+  CorrectCallLeadLinkResult,
+  LeadAssignmentDryRun,
+  LeadAssignmentRule,
+  LeadImportJob,
+  LeadImportPreview,
+  LeadImportPreviewRow,
+  LeadImportResult,
+  LeadReport,
+  MobileLeadUpdateReceipt,
+};
+
 export interface EmployeeListFilter {
   search?: string;
   status?: "invited" | "active" | "paused" | "deactivated";
@@ -302,7 +411,10 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly Permissio
   ],
   // Organization-wide employee/call routes remain fail-closed; lead routes apply
   // the manager's explicit membership_team_scopes inside the repository.
-  manager: ["organization.read", "employees.read", "calls.read", "leads.read", "leads.manage", "leads.assign"],
+  manager: [
+    "organization.read", "employees.read", "calls.read", "calls.annotate",
+    "leads.read", "leads.manage", "leads.assign", "reports.read",
+  ],
   analyst: ["organization.read", "employees.read", "calls.read", "reports.read", "reports.export"],
   // Lead routes restrict this role to the linked employee assignment.
   employee: ["organization.read", "leads.read", "leads.manage"],

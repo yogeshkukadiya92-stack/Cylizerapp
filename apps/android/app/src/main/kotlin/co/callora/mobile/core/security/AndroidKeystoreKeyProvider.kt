@@ -38,5 +38,6 @@ class AndroidKeystoreKeyProvider(private val alias: String) {
         const val CREDENTIAL_ALIAS = "callora_device_credentials_v1"
         const val PROTOCOL_ALIAS = "callora_mobile_protocol_v1"
         const val FIELD_ALIAS = "callora_call_fields_v1"
+        const val LEAD_MUTATION_ALIAS = "callora_lead_mutations_v1"
     }
 }

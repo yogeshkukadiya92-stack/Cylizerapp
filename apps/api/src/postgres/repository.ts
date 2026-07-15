@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   isIsoDateTime,
+  isLeadSource,
   isRecord,
   type CallLogSyncItemResult,
   CallLog,
@@ -17,6 +18,16 @@ import {
   LeadNote,
   LeadQueueSummary,
   LeadStatus,
+  LeadAssignmentRule,
+  LeadImportPreview,
+  LeadImportJob,
+  LeadImportResult,
+  LeadAssignmentDryRun,
+  ApplyLeadAssignmentRulesResult,
+  CorrectCallLeadLinkResult,
+  MobileLeadUpdateReceipt,
+  LeadReport,
+  LeadSource,
   OrganizationId,
   SystemRoleKey,
 } from "@callora/contracts";
@@ -38,6 +49,16 @@ import type {
   CreateLeadNoteOptions,
   CreateLeadFollowUpOptions,
   CompleteLeadFollowUpOptions,
+  PreviewLeadImportOptions,
+  LeadImportAccessOptions,
+  CommitLeadImportOptions,
+  CreateLeadAssignmentRuleOptions,
+  UpdateLeadAssignmentRuleOptions,
+  LeadAssignmentOperationOptions,
+  ApplyLeadAssignmentRulesOptions,
+  CorrectCallLeadLinkOptions,
+  MobileLeadUpdateOptions,
+  LeadReportOptions,
   IngestCallResult,
   MobileActivationPayload,
   MobilePolicy,
@@ -64,6 +85,7 @@ import {
 } from "../call-pii-crypto.js";
 import type { CalloraRepository, IdGenerator } from "../repository.js";
 import {
+  badRequest as domainBadRequest,
   conflict as domainConflict,
   consentRequired as domainConsentRequired,
   forbidden as domainForbidden,
@@ -369,6 +391,85 @@ function leadScopePredicate(
   )`;
 }
 
+/**
+ * Import jobs contain encrypted staged PII, so creator ownership alone is not
+ * enough: non-organization actors must still cover every staged team now.
+ */
+function leadImportScopePredicate(
+  scope: LeadAccessScope,
+  values: unknown[],
+  jobAlias = "job",
+): string {
+  if (scope.kind === "organization") return "true";
+  if (scope.kind === "teams") {
+    if (scope.teamNames.length === 0) return "false";
+    values.push(scope.teamNames);
+    return `not exists (
+      select 1
+      from callora.lead_import_rows as scoped_row
+      left join callora.teams as scoped_team
+        on scoped_team.organization_id = scoped_row.organization_id
+       and scoped_team.id = scoped_row.team_id
+      where scoped_row.organization_id = ${jobAlias}.organization_id
+        and scoped_row.job_id = ${jobAlias}.id
+        and scoped_row.team_id is not null
+        and (scoped_team.id is null or scoped_team.name <> all($${values.length}::text[]))
+    )`;
+  }
+  if (!isCanonicalUuid(scope.employeeId)) return "false";
+  values.push(scope.employeeId);
+  return `exists (
+    select 1
+    from callora.employees as scoped_employee
+    where scoped_employee.organization_id = ${jobAlias}.organization_id
+      and scoped_employee.id = $${values.length}::uuid
+      and scoped_employee.status = 'active'
+      and scoped_employee.team_id is not null
+      and not exists (
+        select 1
+        from callora.lead_import_rows as scoped_row
+        where scoped_row.organization_id = ${jobAlias}.organization_id
+          and scoped_row.job_id = ${jobAlias}.id
+          and scoped_row.team_id is not null
+          and scoped_row.team_id <> scoped_employee.team_id
+      )
+  )`;
+}
+
+function leadImportAccessPredicate(
+  scope: LeadAccessScope,
+  actorUserId: string,
+  values: unknown[],
+  jobAlias = "job",
+): string {
+  if (scope.kind === "organization") return "true";
+  values.push(actorUserId);
+  const creatorParameter = values.length;
+  const scopePredicate = leadImportScopePredicate(scope, values, jobAlias);
+  return `(${jobAlias}.created_by_user_id = $${creatorParameter}::uuid and ${scopePredicate})`;
+}
+
+interface LeadPhoneLookupCandidate {
+  field: "phone" | "alternate";
+  keyVersion: number;
+  blindIndex: Buffer;
+}
+
+function leadPhoneLookupCandidates(
+  crypto: CallPiiCrypto,
+  organizationId: OrganizationId,
+  normalizedPhones: string[],
+): LeadPhoneLookupCandidate[] {
+  return [...new Set(normalizedPhones)].flatMap((phoneNumber) => [
+    ...crypto.computeBlindIndexCandidates(
+      { organizationId, field: "phone_number" }, phoneNumber,
+    ).map((candidate) => ({ ...candidate, field: "phone" as const })),
+    ...crypto.computeBlindIndexCandidates(
+      { organizationId, field: "alternate_phone_number" }, phoneNumber,
+    ).map((candidate) => ({ ...candidate, field: "alternate" as const })),
+  ]);
+}
+
 function employeeScopePredicate(
   scope: LeadAccessScope,
   values: unknown[],
@@ -522,6 +623,18 @@ function parseStoredObject<T>(value: unknown): T | undefined {
   return isRecord(candidate) ? candidate as T : undefined;
 }
 
+function parseStoredArray<T>(value: unknown): T[] {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    try {
+      candidate = JSON.parse(candidate) as unknown;
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(candidate) ? candidate as T[] : [];
+}
+
 function mobilePolicyFromRow(row: DbRow): MobilePolicy {
   const disclosures = Array.isArray(row.disclosures) && row.disclosures.every((value) => typeof value === "string")
     ? row.disclosures as string[]
@@ -665,6 +778,241 @@ export class PostgresCalloraRepository implements CalloraRepository {
       ...(nextFollowUpRow === undefined ? {} : { nextFollowUp: mapLeadFollowUp(nextFollowUpRow, at) }),
       overdueFollowUpCount: Number(row.overdue_follow_up_count ?? 0),
       unreturnedMissedCallCount: Number(row.unreturned_missed_call_count ?? 0),
+    };
+  }
+
+  private mapLeadImportJob(row: DbRow): LeadImportJob {
+    return {
+      id: String(row.id),
+      organizationId: String(row.organization_id),
+      fileName: String(row.file_name),
+      status: String(row.status) as LeadImportJob["status"],
+      totalRows: Number(row.total_rows),
+      validRows: Number(row.valid_rows),
+      duplicateRows: Number(row.duplicate_rows),
+      errorRows: Number(row.error_rows),
+      importedRows: Number(row.imported_rows),
+      processedRows: Number(row.processed_rows),
+      createdByUserId: String(row.created_by_user_id),
+      createdAt: new Date(String(row.created_at)).toISOString(),
+      updatedAt: new Date(String(row.updated_at)).toISOString(),
+      ...(row.completed_at === null || row.completed_at === undefined
+        ? {} : { completedAt: new Date(String(row.completed_at)).toISOString() }),
+      ...(typeof row.last_error === "string" ? { lastError: row.last_error } : {}),
+      errorDownloadAvailable: Number(row.error_rows) + Number(row.duplicate_rows) > 0,
+    };
+  }
+
+  private mapLeadImportRow(row: DbRow): LeadImportPreview["rows"][number] {
+    const crypto = this.requireCallPiiCrypto();
+    const organizationId = String(row.organization_id);
+    const rowId = String(row.id);
+    const decrypt = (alternate: boolean): string | undefined => {
+      const ciphertext = row[alternate ? "alternate_phone_number_ciphertext" : "phone_number_ciphertext"];
+      if (ciphertext === null || ciphertext === undefined) return undefined;
+      const nonce = row[alternate ? "alternate_phone_number_nonce" : "phone_number_nonce"];
+      const blindIndex = row[alternate ? "alternate_phone_number_blind_index" : "phone_number_blind_index"];
+      if (!Buffer.isBuffer(ciphertext) || !Buffer.isBuffer(nonce) || !Buffer.isBuffer(blindIndex)) {
+        throw new Error("PostgreSQL returned an incomplete encrypted import-phone envelope");
+      }
+      return crypto.decryptField({
+        organizationId,
+        rowId,
+        field: alternate ? "alternate_phone_number" : "phone_number",
+      }, {
+        formatVersion: Number(row[alternate ? "alternate_phone_encryption_version" : "phone_encryption_version"]),
+        keyVersion: Number(row[alternate ? "alternate_phone_key_version" : "phone_key_version"]),
+        blindIndexKeyVersion: Number(row[
+          alternate ? "alternate_phone_blind_index_key_version" : "phone_blind_index_key_version"
+        ]),
+        ciphertext,
+        nonce,
+        blindIndex,
+      });
+    };
+    const phoneNumber = decrypt(false) ?? "";
+    const alternatePhoneNumber = decrypt(true);
+    const input: LeadImportPreview["rows"][number]["input"] = {
+      firstName: typeof row.first_name === "string" ? row.first_name : "",
+      phoneNumber,
+      ...(typeof row.last_name === "string" ? { lastName: row.last_name } : {}),
+      ...(typeof row.company_name === "string" ? { companyName: row.company_name } : {}),
+      ...(alternatePhoneNumber === undefined ? {} : { alternatePhoneNumber }),
+      ...(typeof row.email === "string" ? { email: row.email } : {}),
+      ...(typeof row.source === "string" ? { source: row.source as LeadSource } : {}),
+      ...(typeof row.status_name === "string" ? { statusName: row.status_name } : {}),
+      ...(typeof row.assigned_employee_code === "string"
+        ? { assignedEmployeeCode: row.assigned_employee_code } : {}),
+      ...(parseStoredArray<string>(row.tag_names).length > 0
+        ? { tagNames: parseStoredArray<string>(row.tag_names) } : {}),
+      ...(Object.keys(parseStoredObject<Record<string, unknown>>(row.custom_fields) ?? {}).length > 0
+        ? { customFields: parseStoredObject<Record<string, never>>(row.custom_fields) ?? {} } : {}),
+    };
+    return {
+      rowNumber: Number(row.row_number),
+      decision: String(row.decision) as LeadImportPreview["rows"][number]["decision"],
+      input,
+      issues: parseStoredArray<LeadImportPreview["rows"][number]["issues"][number]>(row.issues),
+      ...(typeof row.duplicate_lead_id === "string" ? { duplicateLeadId: row.duplicate_lead_id } : {}),
+      ...(typeof row.proposed_assigned_employee_id === "string"
+        ? { proposedAssignedEmployeeId: row.proposed_assigned_employee_id } : {}),
+    };
+  }
+
+  private mapLeadAssignmentRule(row: DbRow): LeadAssignmentRule {
+    return {
+      id: String(row.id),
+      organizationId: String(row.organization_id),
+      name: String(row.name),
+      priority: Number(row.priority),
+      active: row.active === true,
+      conditions: parseStoredObject<LeadAssignmentRule["conditions"]>(row.conditions) ?? {},
+      strategy: String(row.strategy) as LeadAssignmentRule["strategy"],
+      employeeIds: parseStoredArray<string>(row.employee_ids),
+      version: Number(row.version),
+      createdByUserId: String(row.created_by_user_id),
+      updatedByUserId: String(row.updated_by_user_id),
+      createdAt: new Date(String(row.created_at)).toISOString(),
+      updatedAt: new Date(String(row.updated_at)).toISOString(),
+    };
+  }
+
+  private async findLeadImportWithClient(
+    client: PgClientLike,
+    options: LeadImportAccessOptions & { jobId: string },
+  ): Promise<LeadImportPreview | undefined> {
+    if (!isCanonicalUuid(options.jobId)) return undefined;
+    const accessValues: unknown[] = [options.organizationId, options.jobId];
+    const access = leadImportAccessPredicate(options.scope, options.actorUserId, accessValues, "job");
+    const result = await client.query<DbRow>(`
+      select job.*
+      from callora.lead_import_jobs as job
+      where job.organization_id = $1::uuid and job.id = $2::uuid
+        and ${access}
+      limit 1
+    `, accessValues);
+    const jobRow = result.rows[0];
+    if (!jobRow) return undefined;
+    const rows = await client.query<DbRow>(`
+      select *
+      from callora.lead_import_rows
+      where organization_id = $1::uuid and job_id = $2::uuid
+      order by row_number
+    `, [options.organizationId, options.jobId]);
+    return {
+      job: this.mapLeadImportJob(jobRow),
+      rows: rows.rows.map((row) => this.mapLeadImportRow(row)),
+      replayed: false,
+    };
+  }
+
+  private async leadAssignmentPlanWithClient(
+    client: PgClientLike,
+    organizationId: OrganizationId,
+    scope: LeadAccessScope,
+    lockLeads: boolean,
+  ): Promise<{
+    dryRun: LeadAssignmentDryRun;
+    assignments: Array<{ leadId: string; version: number; ruleId: string; employeeId: string }>;
+    ruleAdvances: Map<string, number>;
+  }> {
+    const ruleValues: unknown[] = [organizationId];
+    const ruleScope = scope.kind === "organization" ? "true"
+      : scope.kind === "teams"
+        ? (() => { ruleValues.push(scope.teamNames); return `exists (
+            select 1 from callora.teams scoped_team
+            where scoped_team.organization_id = rule.organization_id
+              and scoped_team.id = rule.team_id and scoped_team.name = any($2::text[])
+          )`; })()
+        : (() => { ruleValues.push(scope.employeeId); return `exists (
+            select 1 from callora.employees scoped_employee
+            where scoped_employee.organization_id = rule.organization_id
+              and scoped_employee.team_id = rule.team_id and scoped_employee.id = $2::uuid
+          )`; })();
+    // Rules are locked before members/employees, matching the update path's
+    // lock order. This prevents a disable/member rewrite from racing an apply.
+    const ruleRows = await client.query<DbRow>(`
+      select rule.*
+      from callora.lead_assignment_rules as rule
+      where rule.organization_id = $1::uuid and rule.active and ${ruleScope}
+      order by rule.priority, rule.id
+      ${lockLeads ? "for update of rule" : ""}
+    `, ruleValues);
+    const ruleIds = ruleRows.rows
+      .map((row) => row.id)
+      .filter((id): id is string => typeof id === "string");
+    const memberRows = ruleIds.length === 0 ? { rows: [] as DbRow[] } : await client.query<DbRow>(`
+      select member.rule_id, member.employee_id, member.position,
+        member.team_id as member_team_id, employee.team_id as employee_team_id,
+        employee.status as employee_status
+      from callora.lead_assignment_rule_employees as member
+      join callora.employees as employee
+        on employee.organization_id = member.organization_id
+       and employee.id = member.employee_id
+      where member.organization_id = $1::uuid and member.rule_id = any($2::uuid[])
+      order by member.rule_id, member.position, member.employee_id
+      ${lockLeads ? "for update of member, employee" : ""}
+    `, [organizationId, ruleIds]);
+    const rules = ruleRows.rows.flatMap((row) => {
+      const members = memberRows.rows.filter((member) => member.rule_id === row.id);
+      if (members.length === 0 || members.some((member) =>
+        member.employee_status !== "active" || member.member_team_id !== row.team_id ||
+        member.employee_team_id !== row.team_id || typeof member.employee_id !== "string")) return [];
+      row.employee_ids = members.map((member) => String(member.employee_id));
+      return [{ row, rule: this.mapLeadAssignmentRule(row) }];
+    });
+    const leadValues: unknown[] = [organizationId];
+    const leadScope = leadScopePredicate(scope, leadValues);
+    const leads = await client.query<DbRow>(`
+      select lead.id, lead.team_id, lead.status_id, lead.source, lead.temperature, lead.version
+      from callora.leads as lead
+      where lead.organization_id = $1::uuid and lead.assigned_employee_id is null
+        and lead.archived_at is null and ${leadScope}
+      order by lead.created_at, lead.id
+      ${lockLeads ? "for update" : ""}
+    `, leadValues);
+    const cursors = new Map(rules.map(({ row, rule }) => [rule.id, Number(row.round_robin_cursor ?? 0)]));
+    const ruleAdvances = new Map<string, number>();
+    const distribution = new Map<string, number>();
+    const assignments: Array<{ leadId: string; version: number; ruleId: string; employeeId: string }> = [];
+    let unmatchedLeads = 0;
+    for (const lead of leads.rows) {
+      const matched = rules.find(({ row, rule }) => {
+        if (row.team_id !== lead.team_id) return false;
+        if (rule.conditions.sources?.length && !rule.conditions.sources.includes(String(lead.source) as LeadSource)) return false;
+        if (rule.conditions.temperatures?.length &&
+          (typeof lead.temperature !== "string" || !rule.conditions.temperatures.includes(lead.temperature as Lead["temperature"] & string))) return false;
+        if (rule.conditions.statusIds?.length && !rule.conditions.statusIds.includes(String(lead.status_id))) return false;
+        return true;
+      });
+      if (!matched || matched.rule.employeeIds.length === 0) {
+        unmatchedLeads += 1;
+        continue;
+      }
+      const cursor = cursors.get(matched.rule.id) ?? 0;
+      const employeeId = matched.rule.employeeIds[
+        matched.rule.strategy === "fixed_owner" ? 0 : cursor % matched.rule.employeeIds.length
+      ];
+      if (!employeeId) {
+        unmatchedLeads += 1;
+        continue;
+      }
+      if (matched.rule.strategy === "round_robin") cursors.set(matched.rule.id, cursor + 1);
+      ruleAdvances.set(matched.rule.id, (ruleAdvances.get(matched.rule.id) ?? 0) +
+        (matched.rule.strategy === "round_robin" ? 1 : 0));
+      distribution.set(employeeId, (distribution.get(employeeId) ?? 0) + 1);
+      assignments.push({
+        leadId: String(lead.id), version: Number(lead.version), ruleId: matched.rule.id, employeeId,
+      });
+    }
+    return {
+      dryRun: {
+        matchedLeads: assignments.length,
+        unmatchedLeads,
+        distribution: [...distribution].map(([employeeId, leadCount]) => ({ employeeId, leadCount })),
+      },
+      assignments,
+      ruleAdvances,
     };
   }
 
@@ -2035,6 +2383,1747 @@ export class PostgresCalloraRepository implements CalloraRepository {
     });
   }
 
+  async previewLeadImport(options: PreviewLeadImportOptions): Promise<LeadImportPreview> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId) ||
+      !/^[0-9a-f]{64}$/.test(options.requestFingerprint)) {
+      throw new Error("Lead import preview identifiers or fingerprint are invalid");
+    }
+    const crypto = this.requireCallPiiCrypto();
+    return this.withTenant(options.organizationId, options.actorUserId, async (client) => {
+      // Serialize first use of an organization/request pair. Without this,
+      // concurrent previews can both observe absence and one surfaces the
+      // unique request constraint as a 500 instead of a replay/conflict.
+      await client.query(`
+        select pg_advisory_xact_lock(hashtextextended($1, 0))
+      `, [`lead-import-preview:${options.organizationId}:${options.input.requestId}`]);
+      const existing = await client.query<DbRow>(`
+        select id, request_fingerprint
+        from callora.lead_import_jobs
+        where organization_id = $1::uuid and request_id = $2
+        for update
+      `, [options.organizationId, options.input.requestId]);
+      if (existing.rows[0]) {
+        if (existing.rows[0].request_fingerprint !== options.requestFingerprint) {
+          throw domainConflict("The import request ID was already used with a different payload");
+        }
+        const jobId = existing.rows[0].id;
+        if (typeof jobId !== "string") throw new Error("Lead import replay has an invalid job ID");
+        const replay = await this.findLeadImportWithClient(client, { ...options, jobId });
+        if (!replay) {
+          throw domainForbidden("The lead import is outside your current lead scope");
+        }
+        return { ...replay, replayed: true };
+      }
+
+      const statuses = await client.query<DbRow>(`
+        select * from callora.lead_statuses
+        where organization_id = $1::uuid and is_active
+        order by is_initial desc, position, id
+      `, [options.organizationId]);
+      const teamValues: unknown[] = [options.organizationId];
+      const teamScope = options.scope.kind === "teams"
+        ? (() => { teamValues.push(options.scope.teamNames); return "team.name = any($2::text[])"; })()
+        : options.scope.kind === "assigned"
+          ? (() => { teamValues.push(options.scope.employeeId); return `exists (
+              select 1 from callora.employees scoped_employee
+              where scoped_employee.organization_id = team.organization_id
+                and scoped_employee.team_id = team.id and scoped_employee.id = $2::uuid
+            )`; })()
+          : "true";
+      const teams = await client.query<DbRow>(`
+        select team.id, team.name
+        from callora.teams as team
+        where team.organization_id = $1::uuid and team.is_active and ${teamScope}
+        order by lower(team.name), team.id
+      `, teamValues);
+      const accessibleTeamIds = new Set(teams.rows.map((row) => String(row.id)));
+      const employeeValues: unknown[] = [options.organizationId];
+      const employeeScope = employeeScopePredicate(options.scope, employeeValues);
+      const employees = await client.query<DbRow>(`
+        select employee.id, employee.team_id, employee.employee_code, employee.display_name
+        from callora.employees as employee
+        where employee.organization_id = $1::uuid and employee.status = 'active'
+          and employee.team_id is not null and ${employeeScope}
+        order by employee.team_id, lower(employee.display_name), employee.id
+      `, employeeValues);
+      const defaultTeamId = typeof teams.rows[0]?.id === "string" ? teams.rows[0].id : undefined;
+
+      const rules = await client.query<DbRow>(`
+        select rule.*, coalesce(
+          jsonb_agg(member.employee_id order by member.position)
+            filter (where member.employee_id is not null), '[]'::jsonb
+        ) as employee_ids
+        from callora.lead_assignment_rules as rule
+        left join callora.lead_assignment_rule_employees as member
+          on member.organization_id = rule.organization_id and member.rule_id = rule.id
+        left join callora.employees as rule_employee
+          on rule_employee.organization_id = member.organization_id
+         and rule_employee.id = member.employee_id
+        where rule.organization_id = $1::uuid and rule.active
+        group by rule.id
+        having count(member.employee_id) > 0
+          and count(member.employee_id) = count(rule_employee.id) filter (
+            where rule_employee.status = 'active' and rule_employee.team_id = rule.team_id
+          )
+        order by rule.priority, rule.id
+      `, [options.organizationId]);
+      const availableRules = rules.rows
+        .filter((row) => accessibleTeamIds.has(String(row.team_id)))
+        .map((row) => ({ row, rule: this.mapLeadAssignmentRule(row) }))
+        .filter(({ rule }) => rule.employeeIds.length > 0);
+      const ruleCursors = new Map<string, number>();
+      const phoneRows = new Map<string, number>();
+
+      type Staged = {
+        id: string;
+        rowNumber: number;
+        decision: "valid" | "duplicate" | "invalid";
+        input: PreviewLeadImportOptions["input"]["rows"][number];
+        issues: LeadImportPreview["rows"][number]["issues"];
+        teamId?: string;
+        statusId?: string;
+        assignedEmployeeId?: string;
+        ruleId?: string;
+        ruleVersion?: number;
+        duplicateRowNumber?: number;
+        duplicateLeadId?: string;
+        phone?: EncryptedCallPiiField;
+        alternate?: EncryptedCallPiiField;
+      };
+      const staged: Staged[] = [];
+
+      for (const [index, input] of options.input.rows.entries()) {
+        const id = randomUUID();
+        const rowNumber = index + 1;
+        const firstName = input.firstName.trim();
+        const phoneNumber = input.phoneNumber.trim();
+        const validPhone = /^\+[1-9]\d{7,14}$/.test(phoneNumber);
+        const issues: LeadImportPreview["rows"][number]["issues"] = [];
+        if (!firstName) issues.push({ field: "firstName", code: "required", message: "First name is required" });
+        if (!validPhone) issues.push({ field: "phoneNumber", code: "invalid_phone", message: "Phone must use E.164 format" });
+        if (input.email !== undefined && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email.trim())) {
+          issues.push({ field: "email", code: "invalid_email", message: "Email is invalid" });
+        }
+        if (input.alternatePhoneNumber !== undefined &&
+          !/^\+[1-9]\d{7,14}$/.test(input.alternatePhoneNumber.trim())) {
+          issues.push({ field: "alternatePhoneNumber", code: "invalid_phone", message: "Alternate phone must use E.164 format" });
+        }
+        if (input.source !== undefined && !isLeadSource(input.source)) {
+          issues.push({ field: "source", code: "invalid_source", message: "Lead source is invalid" });
+        }
+        const statusRow = input.statusName
+          ? statuses.rows.find((row) => String(row.name).toLocaleLowerCase() === input.statusName!.trim().toLocaleLowerCase())
+          : statuses.rows[0];
+        if (!statusRow) issues.push({ field: "statusName", code: "unknown_status", message: "Lead status was not found" });
+        const ownerRow = input.assignedEmployeeCode
+          ? employees.rows.find((row) => typeof row.employee_code === "string" &&
+            row.employee_code.toLocaleLowerCase() === input.assignedEmployeeCode!.trim().toLocaleLowerCase())
+          : undefined;
+        if (input.assignedEmployeeCode && !ownerRow) {
+          issues.push({ field: "assignedEmployeeCode", code: "unknown_owner", message: "Active owner was not found" });
+        }
+        const teamId = typeof ownerRow?.team_id === "string" ? ownerRow.team_id : defaultTeamId;
+        if (!teamId) issues.push({ field: "assignedEmployeeCode", code: "unknown_owner", message: "No accessible team is available" });
+
+        const alternatePhoneNumber = input.alternatePhoneNumber?.trim();
+        const validAlternatePhone = alternatePhoneNumber !== undefined && /^\+[1-9]\d{7,14}$/.test(alternatePhoneNumber);
+        let duplicateRowNumber: number | undefined;
+        for (const [field, candidate] of [
+          ["phoneNumber", validPhone ? phoneNumber : undefined],
+          ["alternatePhoneNumber", validAlternatePhone ? alternatePhoneNumber : undefined],
+        ] as const) {
+          if (!candidate) continue;
+          const phoneKey = `${teamId ?? "unresolved"}:${candidate}`;
+          const priorRow = phoneRows.get(phoneKey);
+          if (priorRow !== undefined) {
+            duplicateRowNumber ??= priorRow;
+            issues.push({ field, code: "duplicate_in_file", message: `Duplicates row ${priorRow}` });
+          } else if (field === "alternatePhoneNumber" && candidate === phoneNumber) {
+            duplicateRowNumber ??= rowNumber;
+            issues.push({ field, code: "duplicate_in_file", message: "Duplicates phoneNumber in this row" });
+          }
+        }
+        let duplicateLeadId: string | undefined;
+        const invalidBeforeDuplicateLookup = issues.some((issue) =>
+          !["duplicate_in_file", "duplicate_existing"].includes(issue.code));
+        if (!invalidBeforeDuplicateLookup && validPhone && teamId && duplicateRowNumber === undefined) {
+          const candidates = leadPhoneLookupCandidates(crypto, options.organizationId, [
+            phoneNumber,
+            ...(validAlternatePhone && alternatePhoneNumber ? [alternatePhoneNumber] : []),
+          ]);
+          const values: unknown[] = [options.organizationId, teamId];
+          const predicates = candidates.map((candidate) => {
+            values.push(candidate.keyVersion, candidate.blindIndex);
+            const version = candidate.field === "phone" ? "phone_blind_index_key_version" : "alternate_phone_blind_index_key_version";
+            const blind = candidate.field === "phone" ? "phone_number_blind_index" : "alternate_phone_number_blind_index";
+            return `(lead.${version} = $${values.length - 1}::integer and lead.${blind} = $${values.length}::bytea)`;
+          });
+          const duplicate = await client.query<DbRow>(`
+            select lead.id from callora.leads as lead
+            where lead.organization_id = $1::uuid and lead.team_id = $2::uuid
+              and lead.archived_at is null and (${predicates.join(" or ")})
+            order by lead.id limit 1
+          `, values);
+          duplicateLeadId = typeof duplicate.rows[0]?.id === "string" ? duplicate.rows[0].id : undefined;
+          if (duplicateLeadId) {
+            issues.push({ field: "phoneNumber", code: "duplicate_existing", message: "An existing lead has this phone" });
+          }
+        }
+
+        const duplicate = duplicateRowNumber !== undefined || duplicateLeadId !== undefined;
+        const invalid = issues.some((issue) => !["duplicate_in_file", "duplicate_existing"].includes(issue.code));
+        // Only importable rows reserve phones for later in-file duplicate
+        // checks. An invalid/duplicate row must not poison a valid later row.
+        if (!invalid && !duplicate) {
+          phoneRows.set(`${teamId ?? "unresolved"}:${phoneNumber}`, rowNumber);
+          if (validAlternatePhone && alternatePhoneNumber) {
+            phoneRows.set(`${teamId ?? "unresolved"}:${alternatePhoneNumber}`, rowNumber);
+          }
+        }
+        let assignedEmployeeId = typeof ownerRow?.id === "string" ? ownerRow.id : undefined;
+        let ruleId: string | undefined;
+        let ruleVersion: number | undefined;
+        if (!invalid && !duplicate && !assignedEmployeeId && teamId && statusRow) {
+          const source = input.source ?? "csv_import";
+          const matched = availableRules.find(({ row, rule }) => {
+            if (row.team_id !== teamId) return false;
+            if (rule.conditions.sources?.length && !rule.conditions.sources.includes(source)) return false;
+            if (rule.conditions.temperatures?.length) return false;
+            if (rule.conditions.statusIds?.length && !rule.conditions.statusIds.includes(String(statusRow.id))) return false;
+            return true;
+          });
+          if (matched) {
+            ruleId = matched.rule.id;
+            ruleVersion = matched.rule.version;
+            const cursor = ruleCursors.get(ruleId) ?? Number(matched.row.round_robin_cursor ?? 0);
+            const position = matched.rule.strategy === "fixed_owner" ? 0 : cursor % matched.rule.employeeIds.length;
+            assignedEmployeeId = matched.rule.employeeIds[position];
+            if (matched.rule.strategy === "round_robin" && assignedEmployeeId) {
+              ruleCursors.set(ruleId, cursor + 1);
+            }
+          }
+        }
+
+        const decision = invalid ? "invalid" : duplicate ? "duplicate" : "valid";
+        const phone = decision === "invalid" ? undefined : crypto.encryptField({
+          organizationId: options.organizationId, rowId: id, field: "phone_number",
+        }, phoneNumber);
+        const alternate = decision === "invalid" || input.alternatePhoneNumber === undefined
+          ? undefined
+          : crypto.encryptField({
+            organizationId: options.organizationId, rowId: id, field: "alternate_phone_number",
+          }, input.alternatePhoneNumber.trim());
+        staged.push({ id, rowNumber, decision, input, issues,
+          ...(teamId === undefined ? {} : { teamId }),
+          ...(typeof statusRow?.id === "string" ? { statusId: statusRow.id } : {}),
+          ...(assignedEmployeeId === undefined ? {} : { assignedEmployeeId }),
+          ...(ruleId === undefined ? {} : { ruleId }),
+          ...(ruleVersion === undefined ? {} : { ruleVersion }),
+          ...(duplicateRowNumber === undefined ? {} : { duplicateRowNumber }),
+          ...(duplicateLeadId === undefined ? {} : { duplicateLeadId }),
+          ...(phone === undefined ? {} : { phone }),
+          ...(alternate === undefined ? {} : { alternate }),
+        });
+      }
+
+      const jobId = randomUUID();
+      const validRows = staged.filter((row) => row.decision === "valid").length;
+      const duplicateRows = staged.filter((row) => row.decision === "duplicate").length;
+      const errorRows = staged.filter((row) => row.decision === "invalid").length;
+      await client.query(`
+        insert into callora.lead_import_jobs (
+          id, organization_id, request_id, request_fingerprint, file_name,
+          total_rows, valid_rows, duplicate_rows, error_rows, processed_rows,
+          created_by_user_id, created_at, updated_at
+        ) values (
+          $1::uuid, $2::uuid, $3, $4, $5,
+          $6, $7, $8, $9, $10,
+          $11::uuid, $12::timestamptz, $12::timestamptz
+        )
+      `, [jobId, options.organizationId, options.input.requestId, options.requestFingerprint,
+        options.input.fileName.trim(), staged.length, validRows, duplicateRows, errorRows,
+        duplicateRows + errorRows, options.actorUserId, options.at]);
+
+      for (const row of staged) {
+        const safeFirstName = row.decision === "invalid" ? null : row.input.firstName.trim();
+        const safeEmail = row.decision === "invalid" ? null : row.input.email?.trim().toLocaleLowerCase() ?? null;
+        await client.query(`
+          insert into callora.lead_import_rows (
+            id, organization_id, job_id, row_number, decision,
+            team_id, status_id, proposed_assigned_employee_id, assignment_rule_id,
+            assignment_rule_version,
+            duplicate_row_number, duplicate_lead_id,
+            first_name, last_name, company_name, email, source, status_name,
+            assigned_employee_code, tag_names, custom_fields,
+            phone_encryption_version, phone_key_version, phone_blind_index_key_version,
+            phone_number_ciphertext, phone_number_nonce, phone_number_blind_index,
+            phone_number_last_four, phone_encrypted_at,
+            alternate_phone_encryption_version, alternate_phone_key_version,
+            alternate_phone_blind_index_key_version, alternate_phone_number_ciphertext,
+            alternate_phone_number_nonce, alternate_phone_number_blind_index,
+            alternate_phone_number_last_four, alternate_phone_encrypted_at,
+            issues, created_at, updated_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, $4, $5,
+            $6::uuid, $7::uuid, $8::uuid, $9::uuid,
+            $10::bigint,
+            $11, $12::uuid,
+            $13, $14, $15, $16, $17, $18,
+            $19, $20::jsonb, $21::jsonb,
+            $22, $23, $24, $25::bytea, $26::bytea, $27::bytea, $28, $29::timestamptz,
+            $30, $31, $32, $33::bytea, $34::bytea, $35::bytea, $36, $37::timestamptz,
+            $38::jsonb, $39::timestamptz, $39::timestamptz
+          )
+        `, [
+          row.id, options.organizationId, jobId, row.rowNumber, row.decision,
+          row.teamId ?? null, row.statusId ?? null, row.assignedEmployeeId ?? null, row.ruleId ?? null,
+          row.ruleVersion ?? null,
+          row.duplicateRowNumber ?? null, row.duplicateLeadId ?? null,
+          safeFirstName,
+          row.decision === "invalid" ? null : row.input.lastName?.trim() || null,
+          row.decision === "invalid" ? null : row.input.companyName?.trim() || null,
+          safeEmail, row.decision === "invalid" ? "unknown" : row.input.source ?? "csv_import",
+          row.decision === "invalid" ? null : row.input.statusName?.trim() || null,
+          row.decision === "invalid" ? null : row.input.assignedEmployeeCode?.trim() || null,
+          JSON.stringify(row.decision === "invalid" ? [] : row.input.tagNames ?? []),
+          JSON.stringify(row.decision === "invalid" ? {} : row.input.customFields ?? {}),
+          row.phone?.formatVersion ?? null, row.phone?.keyVersion ?? null,
+          row.phone?.blindIndexKeyVersion ?? null, row.phone?.ciphertext ?? null,
+          row.phone?.nonce ?? null, row.phone?.blindIndex ?? null,
+          row.phone ? row.input.phoneNumber.replace(/\D/g, "").slice(-4) : null,
+          row.phone ? options.at : null,
+          row.alternate?.formatVersion ?? null, row.alternate?.keyVersion ?? null,
+          row.alternate?.blindIndexKeyVersion ?? null, row.alternate?.ciphertext ?? null,
+          row.alternate?.nonce ?? null, row.alternate?.blindIndex ?? null,
+          row.alternate ? row.input.alternatePhoneNumber?.replace(/\D/g, "").slice(-4) ?? null : null,
+          row.alternate ? options.at : null,
+          JSON.stringify(row.issues), options.at,
+        ]);
+      }
+      const preview = await this.findLeadImportWithClient(client, { ...options, jobId });
+      if (!preview) throw new Error("Created lead import is not visible inside its tenant transaction");
+      return preview;
+    });
+  }
+
+  async listLeadImports(options: LeadImportAccessOptions): Promise<LeadImportJob[]> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId)) return [];
+    return this.withTenant(options.organizationId, options.actorUserId, async (client) => {
+      const accessValues: unknown[] = [options.organizationId];
+      const access = leadImportAccessPredicate(options.scope, options.actorUserId, accessValues, "job");
+      const result = await client.query<DbRow>(`
+        select job.* from callora.lead_import_jobs as job
+        where job.organization_id = $1::uuid and ${access}
+        order by job.created_at desc, job.id desc limit 100
+      `, accessValues);
+      return result.rows.map((row) => this.mapLeadImportJob(row));
+    });
+  }
+
+  async findLeadImport(options: LeadImportAccessOptions & { jobId: string }): Promise<LeadImportPreview | undefined> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId) ||
+      !isCanonicalUuid(options.jobId)) return undefined;
+    return this.withTenant(options.organizationId, options.actorUserId, (client) =>
+      this.findLeadImportWithClient(client, options));
+  }
+
+  async commitLeadImport(options: CommitLeadImportOptions): Promise<LeadImportResult | undefined> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId) ||
+      !isCanonicalUuid(options.jobId) || !/^[0-9a-f]{64}$/.test(options.requestFingerprint)) return undefined;
+    const crypto = this.requireCallPiiCrypto();
+    return this.withTenant(options.organizationId, options.actorUserId, async (client) => {
+      const visibleValues: unknown[] = [options.organizationId, options.jobId];
+      const visibleAccess = leadImportAccessPredicate(
+        options.scope, options.actorUserId, visibleValues, "job",
+      );
+      const visible = await client.query<DbRow>(`
+        select job.id from callora.lead_import_jobs as job
+        where job.organization_id = $1::uuid and job.id = $2::uuid
+          and ${visibleAccess}
+        limit 1
+      `, visibleValues);
+      if (!visible.rows[0]) return undefined;
+      const ledger = await client.query<DbRow>(`
+        insert into callora.api_idempotency_keys (
+          organization_id, scope, idempotency_key, request_fingerprint,
+          resource_type, resource_id, expires_at, created_at, updated_at
+        ) values (
+          $1::uuid, 'lead.import.commit', $2, $3,
+          'lead_import', $4::uuid, $5::timestamptz + interval '7 days',
+          $5::timestamptz, $5::timestamptz
+        )
+        on conflict (organization_id, scope, idempotency_key) do nothing
+        returning id
+      `, [options.organizationId, options.input.requestId, options.requestFingerprint, options.jobId, options.at]);
+      if (!ledger.rows[0]) {
+        const existing = await client.query<DbRow>(`
+          select request_fingerprint, resource_id, response_body
+          from callora.api_idempotency_keys
+          where organization_id = $1::uuid and scope = 'lead.import.commit' and idempotency_key = $2
+          for update
+        `, [options.organizationId, options.input.requestId]);
+        const row = existing.rows[0];
+        if (!row || row.request_fingerprint !== options.requestFingerprint || row.resource_id !== options.jobId) {
+          throw domainConflict("The import commit request ID was already used with a different payload");
+        }
+        const stored = parseStoredObject<LeadImportResult>(row.response_body);
+        if (!stored?.job || stored.job.id !== options.jobId) {
+          throw new Error("Import commit replay response is incomplete");
+        }
+        return { ...stored, replayed: true };
+      }
+
+      const jobValues: unknown[] = [options.organizationId, options.jobId];
+      const jobAccess = leadImportAccessPredicate(options.scope, options.actorUserId, jobValues, "job");
+      const jobResult = await client.query<DbRow>(`
+        select job.* from callora.lead_import_jobs as job
+        where job.organization_id = $1::uuid and job.id = $2::uuid
+          and ${jobAccess}
+        for update
+      `, jobValues);
+      const jobRow = jobResult.rows[0];
+      if (!jobRow) return undefined;
+      if (jobRow.status === "completed") {
+        const job = this.mapLeadImportJob(jobRow);
+        const result: LeadImportResult = { job, replayed: true };
+        await client.query(`
+          update callora.api_idempotency_keys
+          set response_status = 200, response_body = $4::jsonb
+          where organization_id = $1::uuid and scope = 'lead.import.commit' and idempotency_key = $2
+            and resource_id = $3::uuid
+        `, [options.organizationId, options.input.requestId, options.jobId, JSON.stringify(result)]);
+        return result;
+      }
+      await client.query(`
+        update callora.lead_import_jobs
+        set status = 'processing', last_error = null
+        where organization_id = $1::uuid and id = $2::uuid
+      `, [options.organizationId, options.jobId]);
+
+      const pending = await client.query<DbRow>(`
+        select * from callora.lead_import_rows
+        where organization_id = $1::uuid and job_id = $2::uuid and decision = 'valid'
+        order by row_number
+        limit 50
+        for update
+      `, [options.organizationId, options.jobId]);
+      let imported = 0;
+      let newDuplicates = 0;
+      let newErrors = 0;
+      const ruleIncrements = new Map<string, number>();
+
+      // Transaction advisory locks are retained until commit. Acquire the
+      // whole batch's tenant/team lock set globally sorted so jobs containing
+      // teams in opposite row order cannot deadlock. This intentionally
+      // serializes import dedup per team; no phone plaintext enters lock keys.
+      const importTeamLockKeys = [...new Set(pending.rows
+        .map((row) => typeof row.team_id === "string"
+          ? `lead-import-team:${options.organizationId}:${row.team_id}`
+          : undefined)
+        .filter((value): value is string => value !== undefined))].sort();
+      for (const lockKey of importTeamLockKeys) {
+        await client.query(`
+          select pg_advisory_xact_lock(hashtextextended($1, 0))
+        `, [lockKey]);
+      }
+      const referencedRuleIds = [...new Set(pending.rows
+        .map((row) => typeof row.assignment_rule_id === "string" ? row.assignment_rule_id : undefined)
+        .filter((value): value is string => value !== undefined))].sort();
+      const lockedRules = referencedRuleIds.length === 0 ? { rows: [] as DbRow[] } : await client.query<DbRow>(`
+        select id, team_id, version, active, strategy, conditions, round_robin_cursor
+        from callora.lead_assignment_rules
+        where organization_id = $1::uuid and id = any($2::uuid[])
+        order by id
+        for update
+      `, [options.organizationId, referencedRuleIds]);
+      const lockedRuleById = new Map(lockedRules.rows.map((row) => [String(row.id), row]));
+      const lockedMembers = referencedRuleIds.length === 0 ? { rows: [] as DbRow[] } : await client.query<DbRow>(`
+        select member.rule_id, member.employee_id, member.position,
+          member.team_id as member_team_id, employee.team_id as employee_team_id,
+          employee.status as employee_status
+        from callora.lead_assignment_rule_employees as member
+        join callora.employees as employee
+          on employee.organization_id = member.organization_id
+         and employee.id = member.employee_id
+        where member.organization_id = $1::uuid and member.rule_id = any($2::uuid[])
+        order by member.rule_id, member.position, member.employee_id
+        for update of member, employee
+      `, [options.organizationId, referencedRuleIds]);
+      const lockedMembersByRule = new Map<string, DbRow[]>();
+      for (const member of lockedMembers.rows) {
+        const ruleId = String(member.rule_id);
+        lockedMembersByRule.set(ruleId, [...(lockedMembersByRule.get(ruleId) ?? []), member]);
+      }
+
+      const invalidateRow = async (
+        rowId: string,
+        issue: LeadImportPreview["rows"][number]["issues"][number],
+      ): Promise<void> => {
+        await client.query(`
+          update callora.lead_import_rows
+          set decision = 'invalid', issues = $3::jsonb,
+              team_id = null, status_id = null, proposed_assigned_employee_id = null,
+              assignment_rule_id = null, assignment_rule_version = null,
+              duplicate_row_number = null, duplicate_lead_id = null,
+              first_name = null, last_name = null, company_name = null, email = null,
+              source = 'unknown', status_name = null, assigned_employee_code = null,
+              tag_names = '[]'::jsonb, custom_fields = '{}'::jsonb,
+              phone_encryption_version = null, phone_key_version = null,
+              phone_blind_index_key_version = null, phone_number_ciphertext = null,
+              phone_number_nonce = null, phone_number_blind_index = null,
+              phone_number_last_four = null, phone_encrypted_at = null,
+              alternate_phone_encryption_version = null, alternate_phone_key_version = null,
+              alternate_phone_blind_index_key_version = null,
+              alternate_phone_number_ciphertext = null, alternate_phone_number_nonce = null,
+              alternate_phone_number_blind_index = null,
+              alternate_phone_number_last_four = null, alternate_phone_encrypted_at = null
+          where organization_id = $1::uuid and id = $2::uuid
+        `, [options.organizationId, rowId, JSON.stringify([issue])]);
+        newErrors += 1;
+      };
+
+      for (const row of pending.rows) {
+        const staged = this.mapLeadImportRow(row);
+        const teamId = typeof row.team_id === "string" ? row.team_id : undefined;
+        const statusId = typeof row.status_id === "string" ? row.status_id : undefined;
+        if (!teamId || !statusId || !/^\+[1-9]\d{7,14}$/.test(staged.input.phoneNumber)) {
+          throw new Error("A valid import row lost its normalized tenant-bound fields");
+        }
+        if (typeof row.assignment_rule_id === "string") {
+          const lockedRule = lockedRuleById.get(row.assignment_rule_id);
+          const stagedRuleVersion = Number(row.assignment_rule_version);
+          const lockedRuleVersion = Number(lockedRule?.version);
+          if (!lockedRule || !Number.isSafeInteger(stagedRuleVersion) ||
+            !Number.isSafeInteger(lockedRuleVersion) || stagedRuleVersion !== lockedRuleVersion) {
+            await invalidateRow(String(row.id), {
+              field: "assignedEmployeeCode",
+              code: "unknown_owner",
+              message: "The assignment rule changed; preview the import again",
+            });
+            continue;
+          }
+          const conditions = parseStoredObject<LeadAssignmentRule["conditions"]>(lockedRule?.conditions) ?? {};
+          const stagedSource = staged.input.source && isLeadSource(staged.input.source)
+            ? staged.input.source : "csv_import";
+          if (lockedRule.active !== true || lockedRule.team_id !== teamId ||
+            conditions.sources?.length && !conditions.sources.includes(stagedSource) ||
+            conditions.temperatures?.length ||
+            conditions.statusIds?.length && !conditions.statusIds.includes(statusId)) {
+            await invalidateRow(String(row.id), {
+              field: "assignedEmployeeCode",
+              code: "unknown_owner",
+              message: "The assignment rule no longer matches this row",
+            });
+            continue;
+          }
+        }
+        const normalizedPhones = [
+          staged.input.phoneNumber,
+          ...(staged.input.alternatePhoneNumber ? [staged.input.alternatePhoneNumber] : []),
+        ];
+        const candidates = leadPhoneLookupCandidates(crypto, options.organizationId, normalizedPhones);
+        const duplicateValues: unknown[] = [options.organizationId, teamId];
+        const duplicatePredicates = candidates.map((candidate) => {
+          duplicateValues.push(candidate.keyVersion, candidate.blindIndex);
+          const version = candidate.field === "phone" ? "phone_blind_index_key_version" : "alternate_phone_blind_index_key_version";
+          const blind = candidate.field === "phone" ? "phone_number_blind_index" : "alternate_phone_number_blind_index";
+          return `(lead.${version} = $${duplicateValues.length - 1}::integer and lead.${blind} = $${duplicateValues.length}::bytea)`;
+        });
+        const duplicate = await client.query<DbRow>(`
+          select lead.id from callora.leads as lead
+          where lead.organization_id = $1::uuid and lead.team_id = $2::uuid
+            and lead.archived_at is null and (${duplicatePredicates.join(" or ")})
+          order by lead.id limit 1
+        `, duplicateValues);
+        const duplicateLeadId = duplicate.rows[0]?.id;
+        if (typeof duplicateLeadId === "string") {
+          await client.query(`
+            update callora.lead_import_rows
+            set decision = 'duplicate', duplicate_lead_id = $3::uuid,
+                issues = $4::jsonb
+            where organization_id = $1::uuid and id = $2::uuid
+          `, [options.organizationId, row.id, duplicateLeadId, JSON.stringify([{
+            field: "phoneNumber", code: "duplicate_existing", message: "An existing lead has this phone",
+          }])]);
+          newDuplicates += 1;
+          continue;
+        }
+
+        const leadId = randomUUID();
+        const phone = crypto.encryptField({
+          organizationId: options.organizationId, rowId: leadId, field: "phone_number",
+        }, staged.input.phoneNumber);
+        const alternate = staged.input.alternatePhoneNumber === undefined ? undefined : crypto.encryptField({
+          organizationId: options.organizationId, rowId: leadId, field: "alternate_phone_number",
+        }, staged.input.alternatePhoneNumber);
+        const status = await client.query<DbRow>(`
+          select is_won, is_lost from callora.lead_statuses
+          where organization_id = $1::uuid and id = $2::uuid and is_active
+          limit 1
+        `, [options.organizationId, statusId]);
+        if (!status.rows[0]) {
+          await invalidateRow(String(row.id), {
+            field: "statusName",
+            code: "unknown_status",
+            message: "The staged lead status is no longer active",
+          });
+          continue;
+        }
+        let assignedEmployeeId = typeof row.proposed_assigned_employee_id === "string"
+          ? row.proposed_assigned_employee_id : undefined;
+        if (typeof row.assignment_rule_id === "string") {
+          const lockedRule = lockedRuleById.get(row.assignment_rule_id);
+          const members = lockedMembersByRule.get(row.assignment_rule_id) ?? [];
+          if (!lockedRule || members.length === 0 || members.some((member) =>
+            member.employee_status !== "active" || member.member_team_id !== teamId ||
+            member.employee_team_id !== teamId || typeof member.employee_id !== "string")) {
+            await invalidateRow(String(row.id), {
+              field: "assignedEmployeeCode",
+              code: "unknown_owner",
+              message: "The assignment rule has no eligible active owner",
+            });
+            continue;
+          }
+          const successfulForRule = ruleIncrements.get(row.assignment_rule_id) ?? 0;
+          const cursor = Number(lockedRule.round_robin_cursor ?? 0) + successfulForRule;
+          const memberIndex = lockedRule.strategy === "fixed_owner" ? 0 : cursor % members.length;
+          assignedEmployeeId = String(members[memberIndex]?.employee_id ?? "");
+        } else if (assignedEmployeeId) {
+          const owner = await client.query<DbRow>(`
+            select id from callora.employees
+            where organization_id = $1::uuid and id = $2::uuid
+              and team_id = $3::uuid and status = 'active'
+            limit 1 for update
+          `, [options.organizationId, assignedEmployeeId, teamId]);
+          if (!owner.rows[0]) {
+            await invalidateRow(String(row.id), {
+              field: "assignedEmployeeCode",
+              code: "unknown_owner",
+              message: "The proposed owner is no longer active",
+            });
+            continue;
+          }
+        }
+        const source = staged.input.source && isLeadSource(staged.input.source) ? staged.input.source : "csv_import";
+        await client.query(`
+          insert into callora.leads (
+            id, organization_id, team_id, status_id, assigned_employee_id,
+            created_by_user_id, updated_by_user_id, first_name, last_name,
+            company_name, email, source, source_reference,
+            phone_encryption_version, phone_key_version, phone_blind_index_key_version,
+            phone_number_ciphertext, phone_number_nonce, phone_number_blind_index,
+            phone_number_last_four, phone_encrypted_at,
+            alternate_phone_encryption_version, alternate_phone_key_version,
+            alternate_phone_blind_index_key_version, alternate_phone_number_ciphertext,
+            alternate_phone_number_nonce, alternate_phone_number_blind_index,
+            alternate_phone_number_last_four, alternate_phone_encrypted_at,
+            tag_ids, custom_fields, converted_at, lost_at, created_at, updated_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
+            $6::uuid, $6::uuid, $7, $8, $9, $10, $11, $12,
+            $13, $14, $15, $16::bytea, $17::bytea, $18::bytea, $19, $20::timestamptz,
+            $21, $22, $23, $24::bytea, $25::bytea, $26::bytea, $27, $28::timestamptz,
+            $29::jsonb, $30::jsonb, $31::timestamptz, $32::timestamptz,
+            $20::timestamptz, $20::timestamptz
+          )
+        `, [
+          leadId, options.organizationId, teamId, statusId,
+          assignedEmployeeId ?? null, options.actorUserId,
+          staged.input.firstName.trim(), staged.input.lastName?.trim() || null,
+          staged.input.companyName?.trim() || null, staged.input.email?.trim().toLocaleLowerCase() || null,
+          source, `${options.jobId}:${row.row_number}`,
+          phone.formatVersion, phone.keyVersion, phone.blindIndexKeyVersion,
+          phone.ciphertext, phone.nonce, phone.blindIndex,
+          staged.input.phoneNumber.replace(/\D/g, "").slice(-4), options.at,
+          alternate?.formatVersion ?? null, alternate?.keyVersion ?? null,
+          alternate?.blindIndexKeyVersion ?? null, alternate?.ciphertext ?? null,
+          alternate?.nonce ?? null, alternate?.blindIndex ?? null,
+          staged.input.alternatePhoneNumber?.replace(/\D/g, "").slice(-4) ?? null,
+          alternate ? options.at : null,
+          JSON.stringify((staged.input.tagNames ?? []).map((tagName) => tagName.trim())),
+          JSON.stringify(staged.input.customFields ?? {}),
+          status.rows[0].is_won === true ? options.at : null,
+          status.rows[0].is_lost === true ? options.at : null,
+        ]);
+        await client.query(`
+          insert into callora.lead_activities (
+            organization_id, lead_id, actor_user_id, kind, summary,
+            new_values, metadata, occurred_at, created_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, 'created', 'Lead imported',
+            $4::jsonb, $5::jsonb, $6::timestamptz, $6::timestamptz
+          )
+        `, [options.organizationId, leadId, options.actorUserId,
+          JSON.stringify({ statusId, assignedEmployeeId: assignedEmployeeId ?? null }),
+          JSON.stringify({ source, importJobId: options.jobId, importRowNumber: row.row_number }), options.at]);
+        await client.query(`
+          update callora.lead_import_rows
+          set decision = 'imported', imported_lead_id = $3::uuid
+          where organization_id = $1::uuid and id = $2::uuid
+        `, [options.organizationId, row.id, leadId]);
+        await this.insertOutboxEvent(client, options.organizationId, "lead", leadId, "lead.created", {
+          leadId, importJobId: options.jobId,
+        });
+        imported += 1;
+        if (typeof row.assignment_rule_id === "string" &&
+          lockedRuleById.get(row.assignment_rule_id)?.strategy === "round_robin") {
+          ruleIncrements.set(row.assignment_rule_id, (ruleIncrements.get(row.assignment_rule_id) ?? 0) + 1);
+        }
+      }
+
+      for (const [ruleId, increment] of ruleIncrements) {
+        const lockedRule = lockedRuleById.get(ruleId);
+        if (!lockedRule) throw new Error("Locked assignment rule disappeared during import commit");
+        const advanced = await client.query<DbRow>(`
+          update callora.lead_assignment_rules
+          set round_robin_cursor = round_robin_cursor + $3::bigint,
+              version = version + 1, updated_by_user_id = $4::uuid,
+              updated_at = $5::timestamptz
+          where organization_id = $1::uuid and id = $2::uuid and strategy = 'round_robin'
+            and version = $6::bigint
+          returning version
+        `, [options.organizationId, ruleId, increment, options.actorUserId, options.at,
+          Number(lockedRule.version)]);
+        const nextRuleVersion = Number(advanced.rows[0]?.version);
+        if (!Number.isSafeInteger(nextRuleVersion)) {
+          throw domainConflict("The assignment rule changed; preview the import again");
+        }
+        // Keep this resumable job aligned with its own cursor advance. Other
+        // jobs recompute under the newly locked cursor when they commit.
+        await client.query(`
+          update callora.lead_import_rows
+          set assignment_rule_version = $4::bigint
+          where organization_id = $1::uuid and job_id = $2::uuid
+            and assignment_rule_id = $3::uuid and decision = 'valid'
+        `, [options.organizationId, options.jobId, ruleId, nextRuleVersion]);
+      }
+      const remaining = await client.query<DbRow>(`
+        select count(*)::integer as count
+        from callora.lead_import_rows
+        where organization_id = $1::uuid and job_id = $2::uuid and decision = 'valid'
+      `, [options.organizationId, options.jobId]);
+      const remainingCount = Number(remaining.rows[0]?.count ?? 0);
+      const completed = remainingCount === 0;
+      const updatedJob = await client.query<DbRow>(`
+        update callora.lead_import_jobs
+        set status = $3,
+            imported_rows = imported_rows + $4,
+            duplicate_rows = duplicate_rows + $5,
+            error_rows = error_rows + $6,
+            valid_rows = valid_rows - $5 - $6,
+            processed_rows = processed_rows + $4 + $5 + $6,
+            completed_at = case when $7 then $8::timestamptz else null end
+        where organization_id = $1::uuid and id = $2::uuid
+        returning *
+      `, [options.organizationId, options.jobId, completed ? "completed" : "interrupted",
+        imported, newDuplicates, newErrors, completed, options.at]);
+      const job = this.mapLeadImportJob(firstRow(updatedJob.rows, "Import job update returned no row"));
+      const result: LeadImportResult = { job, replayed: false };
+      await client.query(`
+        update callora.api_idempotency_keys
+        set response_status = 200, response_body = $4::jsonb
+        where organization_id = $1::uuid and scope = 'lead.import.commit'
+          and idempotency_key = $2 and resource_id = $3::uuid
+      `, [options.organizationId, options.input.requestId, options.jobId, JSON.stringify(result)]);
+      return result;
+    });
+  }
+
+  async listLeadAssignmentRules(options: LeadAssignmentOperationOptions): Promise<LeadAssignmentRule[]> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId)) return [];
+    return this.withTenant(options.organizationId, options.actorUserId, async (client) => {
+      const values: unknown[] = [options.organizationId];
+      const scope = options.scope.kind === "organization" ? "true"
+        : options.scope.kind === "teams"
+          ? (() => { values.push(options.scope.teamNames); return `exists (
+              select 1 from callora.teams scoped_team
+              where scoped_team.organization_id = rule.organization_id and scoped_team.id = rule.team_id
+                and scoped_team.name = any($2::text[])
+            )`; })()
+          : (() => { values.push(options.scope.employeeId); return `exists (
+              select 1 from callora.employees scoped_employee
+              where scoped_employee.organization_id = rule.organization_id
+                and scoped_employee.team_id = rule.team_id and scoped_employee.id = $2::uuid
+            )`; })();
+      const result = await client.query<DbRow>(`
+        select rule.*, coalesce(
+          jsonb_agg(member.employee_id order by member.position)
+            filter (where member.employee_id is not null), '[]'::jsonb
+        ) as employee_ids
+        from callora.lead_assignment_rules as rule
+        left join callora.lead_assignment_rule_employees as member
+          on member.organization_id = rule.organization_id and member.rule_id = rule.id
+        where rule.organization_id = $1::uuid and ${scope}
+        group by rule.id
+        order by rule.priority, rule.id
+      `, values);
+      return result.rows.map((row) => this.mapLeadAssignmentRule(row));
+    });
+  }
+
+  private async validateRuleEmployeesWithClient(
+    client: PgClientLike,
+    organizationId: OrganizationId,
+    scope: LeadAccessScope,
+    employeeIds: string[],
+  ): Promise<{ teamId: string; employeeIds: string[] } | undefined> {
+    if (employeeIds.some((id) => !isCanonicalUuid(id)) || new Set(employeeIds).size !== employeeIds.length) {
+      return undefined;
+    }
+    // Lock the same employee set in one canonical order regardless of the
+    // caller's desired round-robin positions. Preserve caller order only for
+    // the membership positions written after all locks are held.
+    const lockIds = [...employeeIds].sort();
+    const values: unknown[] = [organizationId, lockIds];
+    const employeeScope = employeeScopePredicate(scope, values);
+    const result = await client.query<DbRow>(`
+      select employee.id, employee.team_id
+      from callora.employees as employee
+      where employee.organization_id = $1::uuid and employee.id = any($2::uuid[])
+        and employee.status = 'active' and employee.team_id is not null and ${employeeScope}
+      order by employee.id
+      for update of employee
+    `, values);
+    if (result.rows.length !== employeeIds.length) return undefined;
+    const teamId = result.rows[0]?.team_id;
+    if (typeof teamId !== "string" || result.rows.some((row) => row.team_id !== teamId)) return undefined;
+    return { teamId, employeeIds: [...employeeIds] };
+  }
+
+  async createLeadAssignmentRule(options: CreateLeadAssignmentRuleOptions): Promise<LeadAssignmentRule | undefined> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId)) return undefined;
+    return this.withTenant(options.organizationId, options.actorUserId, async (client) => {
+      const resolved = await this.validateRuleEmployeesWithClient(
+        client, options.organizationId, options.scope, options.input.employeeIds,
+      );
+      if (!resolved || options.input.strategy === "fixed_owner" && resolved.employeeIds.length !== 1) return undefined;
+      const statusIds = options.input.conditions?.statusIds ?? [];
+      if (statusIds.some((id) => !isCanonicalUuid(id))) return undefined;
+      if (statusIds.length > 0) {
+        const statuses = await client.query<DbRow>(`
+          select count(*)::integer as count from callora.lead_statuses
+          where organization_id = $1::uuid and id = any($2::uuid[]) and is_active
+        `, [options.organizationId, statusIds]);
+        if (Number(statuses.rows[0]?.count) !== new Set(statusIds).size) return undefined;
+      }
+      const id = randomUUID();
+      const result = await client.query<DbRow>(`
+        insert into callora.lead_assignment_rules (
+          id, organization_id, team_id, name, priority, active, conditions, strategy,
+          created_by_user_id, updated_by_user_id, created_at, updated_at
+        ) values (
+          $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::jsonb, $8,
+          $9::uuid, $9::uuid, $10::timestamptz, $10::timestamptz
+        ) returning *
+      `, [id, options.organizationId, resolved.teamId, options.input.name.trim(), options.input.priority,
+        options.input.active ?? true, JSON.stringify(options.input.conditions ?? {}), options.input.strategy,
+        options.actorUserId, options.at]);
+      for (const [position, employeeId] of resolved.employeeIds.entries()) {
+        await client.query(`
+          insert into callora.lead_assignment_rule_employees (
+            organization_id, team_id, rule_id, employee_id, position, created_at
+          ) values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::timestamptz)
+        `, [options.organizationId, resolved.teamId, id, employeeId, position, options.at]);
+      }
+      const row = firstRow(result.rows, "Assignment rule insert returned no row");
+      row.employee_ids = resolved.employeeIds;
+      return this.mapLeadAssignmentRule(row);
+    });
+  }
+
+  async updateLeadAssignmentRule(options: UpdateLeadAssignmentRuleOptions): Promise<LeadAssignmentRule | undefined> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId) ||
+      !isCanonicalUuid(options.ruleId)) return undefined;
+    return this.withTenant(options.organizationId, options.actorUserId, async (client) => {
+      const accessValues: unknown[] = [options.organizationId, options.ruleId];
+      const scope = options.scope.kind === "organization" ? "true"
+        : options.scope.kind === "teams"
+          ? (() => { accessValues.push(options.scope.teamNames); return `exists (
+              select 1 from callora.teams scoped_team where scoped_team.organization_id = rule.organization_id
+                and scoped_team.id = rule.team_id and scoped_team.name = any($3::text[])
+            )`; })()
+          : "false";
+      const current = await client.query<DbRow>(`
+        select rule.*
+        from callora.lead_assignment_rules as rule
+        where rule.organization_id = $1::uuid and rule.id = $2::uuid and ${scope}
+        for update
+      `, accessValues);
+      const currentRow = current.rows[0];
+      if (!currentRow) return undefined;
+      const currentEmployees = await client.query<DbRow>(`
+        select employee_id
+        from callora.lead_assignment_rule_employees
+        where organization_id = $1::uuid and rule_id = $2::uuid
+        order by position
+        for update
+      `, [options.organizationId, options.ruleId]);
+      currentRow.employee_ids = currentEmployees.rows.map((row) => String(row.employee_id));
+      if (Number(currentRow.version) !== options.input.expectedVersion) {
+        throw domainConflict("The assignment rule changed; refresh and retry");
+      }
+      const currentRule = this.mapLeadAssignmentRule(currentRow);
+      const employeeIds = options.input.changes.employeeIds ?? currentRule.employeeIds;
+      const resolved = await this.validateRuleEmployeesWithClient(client, options.organizationId, options.scope, employeeIds);
+      const strategy = options.input.changes.strategy ?? currentRule.strategy;
+      if (!resolved || strategy === "fixed_owner" && resolved.employeeIds.length !== 1) return undefined;
+      if (resolved.teamId !== currentRow.team_id) {
+        // Team identity is immutable. Besides keeping rule semantics stable,
+        // this prevents a preview inserting an old-team composite FK while a
+        // concurrent update moves the rule. Create a new rule for a new team.
+        throw domainConflict("Assignment rule team is immutable; create a new rule for another team");
+      }
+      const conditions = options.input.changes.conditions ?? currentRule.conditions;
+      const statusIds = conditions.statusIds ?? [];
+      if (statusIds.some((id) => !isCanonicalUuid(id))) return undefined;
+      if (statusIds.length > 0) {
+        const statuses = await client.query<DbRow>(`
+          select count(*)::integer as count from callora.lead_statuses
+          where organization_id = $1::uuid and id = any($2::uuid[]) and is_active
+        `, [options.organizationId, statusIds]);
+        if (Number(statuses.rows[0]?.count) !== new Set(statusIds).size) return undefined;
+      }
+      await client.query(`
+        delete from callora.lead_assignment_rule_employees
+        where organization_id = $1::uuid and rule_id = $2::uuid
+      `, [options.organizationId, options.ruleId]);
+      const updated = await client.query<DbRow>(`
+        update callora.lead_assignment_rules
+        set team_id = $3::uuid, name = $4, priority = $5, active = $6,
+            conditions = $7::jsonb, strategy = $8, updated_by_user_id = $9::uuid,
+            updated_at = $10::timestamptz, version = version + 1
+        where organization_id = $1::uuid and id = $2::uuid and version = $11::bigint
+        returning *
+      `, [options.organizationId, options.ruleId, resolved.teamId,
+        options.input.changes.name?.trim() ?? currentRule.name,
+        options.input.changes.priority ?? currentRule.priority,
+        options.input.changes.active ?? currentRule.active, JSON.stringify(conditions), strategy,
+        options.actorUserId, options.at, options.input.expectedVersion]);
+      if (!updated.rows[0]) throw domainConflict("The assignment rule changed; refresh and retry");
+      for (const [position, employeeId] of resolved.employeeIds.entries()) {
+        await client.query(`
+          insert into callora.lead_assignment_rule_employees (
+            organization_id, team_id, rule_id, employee_id, position, created_at
+          ) values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6::timestamptz)
+        `, [options.organizationId, resolved.teamId, options.ruleId, employeeId, position, options.at]);
+      }
+      const row = updated.rows[0];
+      row.employee_ids = resolved.employeeIds;
+      return this.mapLeadAssignmentRule(row);
+    });
+  }
+
+  async dryRunLeadAssignmentRules(options: LeadAssignmentOperationOptions): Promise<LeadAssignmentDryRun> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId)) {
+      return { matchedLeads: 0, unmatchedLeads: 0, distribution: [] };
+    }
+    return this.withTenant(options.organizationId, options.actorUserId, async (client) =>
+      (await this.leadAssignmentPlanWithClient(client, options.organizationId, options.scope, false)).dryRun);
+  }
+
+  async applyLeadAssignmentRules(options: ApplyLeadAssignmentRulesOptions): Promise<ApplyLeadAssignmentRulesResult> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId) ||
+      !/^[0-9a-f]{64}$/.test(options.requestFingerprint)) {
+      throw new Error("Assignment application identifiers or fingerprint are invalid");
+    }
+    return this.withTenant(options.organizationId, options.actorUserId, async (client) => {
+      const inserted = await client.query<DbRow>(`
+        insert into callora.api_idempotency_keys (
+          organization_id, scope, idempotency_key, request_fingerprint,
+          expires_at, created_at, updated_at
+        ) values (
+          $1::uuid, 'lead.assignment.apply', $2, $3,
+          $4::timestamptz + interval '7 days', $4::timestamptz, $4::timestamptz
+        ) on conflict (organization_id, scope, idempotency_key) do nothing
+        returning id
+      `, [options.organizationId, options.input.requestId, options.requestFingerprint, options.at]);
+      if (!inserted.rows[0]) {
+        const existing = await client.query<DbRow>(`
+          select request_fingerprint, response_body from callora.api_idempotency_keys
+          where organization_id = $1::uuid and scope = 'lead.assignment.apply' and idempotency_key = $2
+          for update
+        `, [options.organizationId, options.input.requestId]);
+        const row = existing.rows[0];
+        if (!row || row.request_fingerprint !== options.requestFingerprint) {
+          throw domainConflict("The assignment request ID was already used with a different payload");
+        }
+        const stored = parseStoredObject<ApplyLeadAssignmentRulesResult>(row.response_body);
+        if (!stored) throw new Error("Assignment replay response is incomplete");
+        return { ...stored, replayed: true };
+      }
+      const plan = await this.leadAssignmentPlanWithClient(
+        client, options.organizationId, options.scope, options.input.includeExistingUnassigned,
+      );
+      let appliedLeads = 0;
+      const appliedRuleAdvances = new Map<string, number>();
+      if (options.input.includeExistingUnassigned) {
+        for (const assignment of plan.assignments) {
+          const updated = await client.query<DbRow>(`
+            update callora.leads
+            set assigned_employee_id = $3::uuid, updated_by_user_id = $4::uuid,
+                updated_at = $5::timestamptz, version = version + 1
+            where organization_id = $1::uuid and id = $2::uuid
+              and assigned_employee_id is null and version = $6::bigint
+            returning id
+          `, [options.organizationId, assignment.leadId, assignment.employeeId,
+            options.actorUserId, options.at, assignment.version]);
+          if (!updated.rows[0]) continue;
+          appliedLeads += 1;
+          if (plan.ruleAdvances.has(assignment.ruleId)) {
+            appliedRuleAdvances.set(
+              assignment.ruleId,
+              (appliedRuleAdvances.get(assignment.ruleId) ?? 0) + 1,
+            );
+          }
+          await client.query(`
+            insert into callora.lead_activities (
+              organization_id, lead_id, actor_user_id, kind, summary,
+              old_values, new_values, metadata, occurred_at, created_at
+            ) values (
+              $1::uuid, $2::uuid, $3::uuid, 'assigned', 'Lead assigned by rule',
+              '{"assignedEmployeeId":null}'::jsonb, $4::jsonb, $5::jsonb,
+              $6::timestamptz, $6::timestamptz
+            )
+          `, [options.organizationId, assignment.leadId, options.actorUserId,
+            JSON.stringify({ assignedEmployeeId: assignment.employeeId }),
+            JSON.stringify({ assignmentRuleId: assignment.ruleId, requestId: options.input.requestId }), options.at]);
+          await this.insertOutboxEvent(client, options.organizationId, "lead", assignment.leadId, "lead.assigned", {
+            leadId: assignment.leadId, employeeId: assignment.employeeId, assignmentRuleId: assignment.ruleId,
+          });
+        }
+        for (const [ruleId, advance] of appliedRuleAdvances) {
+          if (advance === 0) continue;
+          await client.query(`
+            update callora.lead_assignment_rules
+            set round_robin_cursor = round_robin_cursor + $3::bigint,
+                updated_by_user_id = $4::uuid, updated_at = $5::timestamptz,
+                version = version + 1
+            where organization_id = $1::uuid and id = $2::uuid and strategy = 'round_robin'
+          `, [options.organizationId, ruleId, advance, options.actorUserId, options.at]);
+        }
+      }
+      const result: ApplyLeadAssignmentRulesResult = {
+        ...plan.dryRun,
+        requestId: options.input.requestId,
+        replayed: false,
+        appliedLeads,
+      };
+      await client.query(`
+        update callora.api_idempotency_keys
+        set response_status = 200, response_body = $3::jsonb
+        where organization_id = $1::uuid and scope = 'lead.assignment.apply' and idempotency_key = $2
+      `, [options.organizationId, options.input.requestId, JSON.stringify(result)]);
+      return result;
+    });
+  }
+
+  async correctCallLeadLink(options: CorrectCallLeadLinkOptions): Promise<CorrectCallLeadLinkResult | undefined> {
+    if (!isCanonicalUuid(options.organizationId) || !isCanonicalUuid(options.actorUserId) ||
+      !isCanonicalUuid(options.callId) ||
+      options.input.expectedLeadId !== null && !isCanonicalUuid(options.input.expectedLeadId) ||
+      options.input.replacementLeadId !== null && !isCanonicalUuid(options.input.replacementLeadId) ||
+      !/^[0-9a-f]{64}$/.test(options.requestFingerprint)) return undefined;
+    return this.withTenant(options.organizationId, options.actorUserId, async (client) => {
+      const callResult = await client.query<DbRow>(`
+        select call_log.id, employee.team_id
+        from callora.call_logs as call_log
+        join callora.employees as employee
+          on employee.organization_id = call_log.organization_id and employee.id = call_log.employee_id
+        where call_log.organization_id = $1::uuid and call_log.id = $2::uuid
+        for update of call_log
+      `, [options.organizationId, options.callId]);
+      const callRow = callResult.rows[0];
+      if (!callRow || typeof callRow.team_id !== "string") return undefined;
+      // Check replay after locking the call but before comparing the mutable
+      // active link. A completed retry must not fail its original CAS after
+      // the first request has already changed that link.
+      const priorLedger = await client.query<DbRow>(`
+        select request_fingerprint, resource_id, response_body
+        from callora.api_idempotency_keys
+        where organization_id = $1::uuid
+          and scope = 'lead.call_link.correct'
+          and idempotency_key = $2
+        for update
+      `, [options.organizationId, options.input.requestId]);
+      if (priorLedger.rows[0]) {
+        const row = priorLedger.rows[0];
+        if (row.request_fingerprint !== options.requestFingerprint || row.resource_id !== options.callId) {
+          throw domainConflict("The correction request ID was already used with a different payload");
+        }
+        const stored = parseStoredObject<CorrectCallLeadLinkResult>(row.response_body);
+        if (!stored) throw new Error("Call-link correction replay response is incomplete");
+        return { ...stored, replayed: true };
+      }
+      const activeResult = await client.query<DbRow>(`
+        select * from callora.call_lead_links
+        where organization_id = $1::uuid and call_log_id = $2::uuid and unlinked_at is null
+        for update
+      `, [options.organizationId, options.callId]);
+      const active = activeResult.rows[0];
+      const currentLeadId = typeof active?.lead_id === "string" ? active.lead_id : null;
+      if (currentLeadId !== options.input.expectedLeadId) {
+        throw domainConflict("The call link changed; refresh and retry");
+      }
+      const accessLeadIds = [...new Set([currentLeadId, options.input.replacementLeadId]
+        .filter((value): value is string => value !== null))].sort();
+      const lockedLeads = accessLeadIds.length === 0 ? { rows: [] as DbRow[] } : await client.query<DbRow>(`
+        select lead.id, lead.team_id, lead.assigned_employee_id, lead.archived_at,
+          lead_team.name as team_name
+        from callora.leads as lead
+        join callora.teams as lead_team
+          on lead_team.organization_id = lead.organization_id and lead_team.id = lead.team_id
+        where lead.organization_id = $1::uuid and lead.id = any($2::uuid[])
+        order by lead.id
+        for update of lead
+      `, [options.organizationId, accessLeadIds]);
+      const leadById = new Map(lockedLeads.rows.map((row) => [String(row.id), row]));
+      const canAccessLockedLead = (row: DbRow | undefined): boolean => Boolean(row) && (
+        options.scope.kind === "organization" ||
+        options.scope.kind === "assigned" && row!.assigned_employee_id === options.scope.employeeId ||
+        options.scope.kind === "teams" && typeof row!.team_name === "string" &&
+          options.scope.teamNames.includes(row!.team_name)
+      );
+      // The current link is historical state: allow authorized unlinking even
+      // after archive/team reassignment. A replacement is a new active link
+      // and must remain active, in the call's team, and in scope while locked.
+      if (currentLeadId && !canAccessLockedLead(leadById.get(currentLeadId))) return undefined;
+      if (options.input.replacementLeadId) {
+        const replacement = leadById.get(options.input.replacementLeadId);
+        if (!canAccessLockedLead(replacement) || replacement?.archived_at != null ||
+          replacement?.team_id !== callRow.team_id) return undefined;
+      }
+
+      const ledger = await client.query<DbRow>(`
+        insert into callora.api_idempotency_keys (
+          organization_id, scope, idempotency_key, request_fingerprint,
+          resource_type, resource_id, expires_at, created_at, updated_at
+        ) values (
+          $1::uuid, 'lead.call_link.correct', $2, $3,
+          'call', $4::uuid, $5::timestamptz + interval '30 days',
+          $5::timestamptz, $5::timestamptz
+        ) on conflict (organization_id, scope, idempotency_key) do nothing
+        returning id
+      `, [options.organizationId, options.input.requestId, options.requestFingerprint, options.callId, options.at]);
+      if (!ledger.rows[0]) {
+        const replay = await client.query<DbRow>(`
+          select request_fingerprint, resource_id, response_body
+          from callora.api_idempotency_keys
+          where organization_id = $1::uuid and scope = 'lead.call_link.correct' and idempotency_key = $2
+          for update
+        `, [options.organizationId, options.input.requestId]);
+        const row = replay.rows[0];
+        if (!row || row.request_fingerprint !== options.requestFingerprint || row.resource_id !== options.callId) {
+          throw domainConflict("The correction request ID was already used with a different payload");
+        }
+        const stored = parseStoredObject<CorrectCallLeadLinkResult>(row.response_body);
+        if (!stored) throw new Error("Call-link correction replay response is incomplete");
+        return { ...stored, replayed: true };
+      }
+
+      if (active && currentLeadId) {
+        await client.query(`
+          update callora.call_lead_links
+          set unlinked_at = $3::timestamptz, unlinked_by_user_id = $4::uuid,
+              unlink_reason = $5
+          where organization_id = $1::uuid and id = $2::uuid and unlinked_at is null
+        `, [options.organizationId, active.id, options.at, options.actorUserId, options.input.reason.trim()]);
+        await client.query(`
+          insert into callora.lead_activities (
+            organization_id, lead_id, actor_user_id, call_log_id, kind, summary,
+            metadata, occurred_at, created_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'call_unlinked',
+            'Call link corrected', $5::jsonb, $6::timestamptz, $6::timestamptz
+          )
+        `, [options.organizationId, currentLeadId, options.actorUserId, options.callId,
+          JSON.stringify({ requestId: options.input.requestId, reason: options.input.reason.trim() }), options.at]);
+      }
+      if (options.input.replacementLeadId) {
+        const linkId = randomUUID();
+        await client.query(`
+          insert into callora.call_lead_links (
+            id, organization_id, call_log_id, lead_id, link_source,
+            linked_by_user_id, correction_reason, linked_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'manual',
+            $5::uuid, $6, $7::timestamptz
+          )
+        `, [linkId, options.organizationId, options.callId, options.input.replacementLeadId,
+          options.actorUserId, options.input.reason.trim(), options.at]);
+        await client.query(`
+          insert into callora.lead_activities (
+            organization_id, lead_id, actor_user_id, call_log_id, kind, summary,
+            metadata, occurred_at, created_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, $4::uuid, 'call_linked',
+            'Call manually linked', $5::jsonb, $6::timestamptz, $6::timestamptz
+          )
+        `, [options.organizationId, options.input.replacementLeadId, options.actorUserId, options.callId,
+          JSON.stringify({ requestId: options.input.requestId, reason: options.input.reason.trim(),
+            linkId, linkSource: "manual" }), options.at]);
+      }
+
+      for (const leadId of new Set([currentLeadId, options.input.replacementLeadId].filter(
+        (value): value is string => value !== null,
+      ))) {
+        await client.query(`
+          update callora.leads as lead
+          set last_contacted_at = linked.maximum_started_at,
+              updated_by_user_id = $3::uuid, updated_at = $4::timestamptz,
+              version = lead.version + 1
+          from (
+            select max(call_log.started_at) filter (where call_log.disposition = 'answered') as maximum_started_at
+            from callora.call_lead_links as link
+            join callora.call_logs as call_log
+              on call_log.organization_id = link.organization_id and call_log.id = link.call_log_id
+            where link.organization_id = $1::uuid and link.lead_id = $2::uuid and link.unlinked_at is null
+          ) as linked
+          where lead.organization_id = $1::uuid and lead.id = $2::uuid
+            and lead.last_contacted_at is distinct from linked.maximum_started_at
+        `, [options.organizationId, leadId, options.actorUserId, options.at]);
+      }
+
+      const result: CorrectCallLeadLinkResult = {
+        requestId: options.input.requestId,
+        callLogId: options.callId,
+        previousLeadId: currentLeadId,
+        replacementLeadId: options.input.replacementLeadId,
+        correctedAt: options.at,
+        replayed: false,
+      };
+      await client.query(`
+        update callora.api_idempotency_keys
+        set response_status = 200, response_body = $3::jsonb
+        where organization_id = $1::uuid and scope = 'lead.call_link.correct' and idempotency_key = $2
+      `, [options.organizationId, options.input.requestId, JSON.stringify(result)]);
+      await client.query(`
+        insert into callora.audit_events (
+          id, organization_id, actor_user_id, action, entity_type, entity_id,
+          request_id, metadata, occurred_at, created_at
+        ) values (
+          $1::uuid, $2::uuid, $3::uuid, 'lead.call_link_corrected', 'call_lead_link',
+          $4::uuid, $5, $6::jsonb, $7::timestamptz, $7::timestamptz
+        )
+      `, [randomUUID(), options.organizationId, options.actorUserId, options.callId,
+        options.input.requestId, JSON.stringify({ previousLeadId: currentLeadId,
+          replacementLeadId: options.input.replacementLeadId }), options.at]);
+      return result;
+    });
+  }
+
+  private async lockActiveMobileTrustWithClient(
+    client: PgClientLike,
+    context: MobileDeviceContext,
+    at: string,
+    requireCurrentConsent = true,
+  ): Promise<{ actorUserId: string; device: DbRow; consentCurrent: boolean } | undefined> {
+    // Shared mutation lock order: employee -> device -> all device credentials
+    // (stable ID order) -> consent -> organization. Heartbeat, ingest, and
+    // lead update must never acquire this trust graph in a different order.
+    const employeeLock = await client.query<DbRow>(`
+      select linked_user_id, status
+      from callora.employees
+      where organization_id = $1::uuid and id = $2::uuid
+      for update
+    `, [context.organizationId, context.employeeId]);
+    const employeeRow = employeeLock.rows[0];
+    if (!employeeRow || employeeRow.status !== "active") return undefined;
+    const deviceLock = await client.query<DbRow>(`
+      select *
+      from callora.employee_devices
+      where organization_id = $1::uuid and id = $2::uuid
+      for update
+    `, [context.organizationId, context.deviceId]);
+    const deviceRow = deviceLock.rows[0];
+    if (!deviceRow || deviceRow.employee_id !== context.employeeId ||
+      deviceRow.status !== "connected" || deviceRow.revoked_at != null) return undefined;
+    const credentialLocks = await client.query<DbRow>(`
+      select id, employee_id, credential_type, lifecycle_state,
+        consumed_at, revoked_at, expires_at
+      from callora.device_credentials
+      where organization_id = $1::uuid and device_id = $2::uuid
+      order by id
+      for update
+    `, [context.organizationId, context.deviceId]);
+    const credentialRow = credentialLocks.rows.find((row) => row.id === context.credentialId);
+    if (!credentialRow || credentialRow.employee_id !== context.employeeId ||
+      credentialRow.credential_type !== "session" || credentialRow.lifecycle_state !== "active" ||
+      credentialRow.consumed_at != null || credentialRow.revoked_at != null ||
+      Date.parse(String(credentialRow.expires_at)) <= Date.parse(at)) return undefined;
+    const consentLock = await client.query<DbRow>(`
+      select id
+      from callora.device_consent_receipts
+      where organization_id = $1::uuid and device_id = $2::uuid and withdrawn_at is null
+      order by id
+      for update
+    `, [context.organizationId, context.deviceId]);
+    const organizationLock = await client.query<DbRow>(`
+      select status
+      from callora.organizations
+      where id = $1::uuid
+      for update
+    `, [context.organizationId]);
+    if (!organizationLock.rows[0] || !["trial", "active"].includes(String(organizationLock.rows[0].status))) {
+      return undefined;
+    }
+    if (!consentLock.rows[0] && requireCurrentConsent) throw domainConsentRequired();
+    const consent = await client.query<DbRow>(`
+      select callora.device_has_current_collection_consent(
+        $1::uuid, $2::uuid, $3::timestamptz
+      ) as consent_current
+    `, [context.organizationId, context.deviceId, at]);
+    const consentCurrent = Boolean(consentLock.rows[0]) && consent.rows[0]?.consent_current === true;
+    if (requireCurrentConsent && !consentCurrent) throw domainConsentRequired();
+    const actorUserId = employeeRow.linked_user_id;
+    if (typeof actorUserId !== "string" || !isCanonicalUuid(actorUserId)) return undefined;
+    return { actorUserId, device: deviceRow, consentCurrent };
+  }
+
+  async applyMobileLeadUpdate(options: MobileLeadUpdateOptions): Promise<MobileLeadUpdateReceipt | undefined> {
+    const context = options.context;
+    if (context.credentialType !== "session" ||
+      !isCanonicalUuid(context.organizationId) || !isCanonicalUuid(context.employeeId) ||
+      !isCanonicalUuid(context.deviceId) || !isCanonicalUuid(context.credentialId) ||
+      !isCanonicalUuid(options.leadId) ||
+      options.input.statusId !== undefined && !isCanonicalUuid(options.input.statusId) ||
+      !/^[0-9a-f]{64}$/.test(options.requestFingerprint)) return undefined;
+    const idempotencyKey = `${context.deviceId}:${options.input.requestId}`;
+    return this.withTenant(context.organizationId, undefined, async (client) => {
+      const trust = await this.lockActiveMobileTrustWithClient(client, context, options.at);
+      if (!trust) return undefined;
+      const { actorUserId } = trust;
+
+      // Exact device/request/resource/fingerprint binding is a replay grant
+      // for the already-completed command. Check it before requiring the lead
+      // to remain active or assigned; reassignment must not break retries.
+      const prior = await client.query<DbRow>(`
+        select request_fingerprint, resource_id, response_body
+        from callora.api_idempotency_keys
+        where organization_id = $1::uuid and scope = 'mobile.lead.update'
+          and idempotency_key = $2 and resource_type = 'lead'
+        for update
+      `, [context.organizationId, idempotencyKey]);
+      if (prior.rows[0]) {
+        const row = prior.rows[0];
+        if (row.request_fingerprint !== options.requestFingerprint || row.resource_id !== options.leadId) {
+          throw domainConflict("The mobile update request ID was already used with a different payload");
+        }
+        const stored = parseStoredObject<{ requestId: string; appliedLeadVersion: number }>(row.response_body);
+        if (!stored || stored.requestId !== options.input.requestId ||
+          !Number.isSafeInteger(stored.appliedLeadVersion)) {
+          throw new Error("Mobile lead-update replay response is incomplete");
+        }
+        return {
+          requestId: stored.requestId,
+          replayed: true,
+          appliedLeadVersion: stored.appliedLeadVersion,
+        };
+      }
+
+      // The relative offline window is mutable with server time, so enforce
+      // it only for a first application. An exact persisted replay remains
+      // valid for the idempotency ledger lifetime after a lost response.
+      const occurredAt = Date.parse(options.input.occurredAt);
+      const receivedAt = Date.parse(options.at);
+      if (occurredAt > receivedAt + 5 * 60 * 1_000 ||
+        occurredAt < receivedAt - 7 * 24 * 60 * 60 * 1_000) {
+        throw domainBadRequest("occurredAt is outside the accepted offline update window", "occurredAt");
+      }
+
+      const leadResult = await client.query<DbRow>(`
+        select lead.*, lead_status.name as status_name,
+          lead_status.is_won as status_is_won, lead_status.is_lost as status_is_lost
+        from callora.leads as lead
+        join callora.lead_statuses as lead_status
+          on lead_status.organization_id = lead.organization_id and lead_status.id = lead.status_id
+        where lead.organization_id = $1::uuid and lead.id = $2::uuid
+          and lead.assigned_employee_id = $3::uuid and lead.archived_at is null
+        for update of lead
+      `, [context.organizationId, options.leadId, context.employeeId]);
+      const leadRow = leadResult.rows[0];
+      if (!leadRow || typeof leadRow.team_id !== "string") return undefined;
+
+      const currentVersion = Number(leadRow.version);
+      if (currentVersion !== options.input.expectedLeadVersion) {
+        throw domainConflict("The lead changed; refresh and retry");
+      }
+      if (options.input.followUp?.reminderAt &&
+        Date.parse(options.input.followUp.reminderAt) > Date.parse(options.input.followUp.dueAt)) {
+        throw domainBadRequest("The follow-up reminder cannot be after its due time", "followUp.reminderAt");
+      }
+
+      let nextStatus = leadRow;
+      if (options.input.statusId) {
+        const status = await client.query<DbRow>(`
+          select * from callora.lead_statuses
+          where organization_id = $1::uuid and id = $2::uuid and is_active
+          limit 1
+        `, [context.organizationId, options.input.statusId]);
+        if (!status.rows[0]) return undefined;
+        nextStatus = status.rows[0];
+      }
+
+      const ledger = await client.query<DbRow>(`
+        insert into callora.api_idempotency_keys (
+          organization_id, scope, idempotency_key, request_fingerprint,
+          resource_type, resource_id, expires_at, created_at, updated_at
+        ) values (
+          $1::uuid, 'mobile.lead.update', $2, $3,
+          'lead', $4::uuid, $5::timestamptz + interval '30 days',
+          $5::timestamptz, $5::timestamptz
+        ) on conflict (organization_id, scope, idempotency_key) do nothing
+        returning id
+      `, [context.organizationId, idempotencyKey, options.requestFingerprint, options.leadId, options.at]);
+      if (!ledger.rows[0]) {
+        const collision = await client.query<DbRow>(`
+          select request_fingerprint, resource_id, response_body
+          from callora.api_idempotency_keys
+          where organization_id = $1::uuid and scope = 'mobile.lead.update'
+            and idempotency_key = $2
+          for update
+        `, [context.organizationId, idempotencyKey]);
+        const row = collision.rows[0];
+        if (!row || row.request_fingerprint !== options.requestFingerprint || row.resource_id !== options.leadId) {
+          throw domainConflict("The mobile update request ID was already used with a different payload");
+        }
+        throw domainConflict("The mobile update is already being processed; retry shortly");
+      }
+
+      const metadata = { requestId: options.input.requestId, deviceId: context.deviceId };
+      if (options.input.note) {
+        const noteId = randomUUID();
+        await client.query(`
+          insert into callora.lead_notes (
+            id, organization_id, lead_id, author_user_id, body, is_pinned,
+            created_at, updated_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, false,
+            $6::timestamptz, $6::timestamptz
+          )
+        `, [noteId, context.organizationId, options.leadId, actorUserId,
+          options.input.note.body.trim(), options.at]);
+        await client.query(`
+          insert into callora.lead_activities (
+            organization_id, lead_id, actor_employee_id, kind, summary,
+            metadata, occurred_at, created_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, 'note_added', 'Mobile note added',
+            $4::jsonb, $5::timestamptz, $6::timestamptz
+          )
+        `, [context.organizationId, options.leadId, context.employeeId,
+          JSON.stringify({ ...metadata, noteId }), options.input.occurredAt, options.at]);
+      }
+
+      let followUpId: string | undefined;
+      if (options.input.followUp) {
+        followUpId = randomUUID();
+        await client.query(`
+          insert into callora.lead_follow_ups (
+            id, organization_id, team_id, lead_id, assigned_employee_id,
+            created_by_user_id, title, notes, due_at, reminder_at, priority,
+            created_at, updated_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
+            $6::uuid, $7, $8, $9::timestamptz, $10::timestamptz, $11,
+            $12::timestamptz, $12::timestamptz
+          )
+        `, [followUpId, context.organizationId, leadRow.team_id, options.leadId,
+          context.employeeId, actorUserId, options.input.followUp.title.trim(),
+          options.input.followUp.notes?.trim() ?? null, options.input.followUp.dueAt,
+          options.input.followUp.reminderAt ?? null, options.input.followUp.priority ?? "normal", options.at]);
+        await client.query(`
+          insert into callora.lead_activities (
+            organization_id, lead_id, actor_employee_id, kind, summary,
+            metadata, occurred_at, created_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, 'follow_up_created',
+            'Mobile follow-up scheduled', $4::jsonb,
+            $5::timestamptz, $6::timestamptz
+          )
+        `, [context.organizationId, options.leadId, context.employeeId,
+          JSON.stringify({ ...metadata, followUpId }), options.input.occurredAt, options.at]);
+      }
+
+      const statusChanged = options.input.statusId !== undefined && options.input.statusId !== leadRow.status_id;
+      if (statusChanged) {
+        await client.query(`
+          insert into callora.lead_activities (
+            organization_id, lead_id, actor_employee_id, kind, summary,
+            old_values, new_values, metadata, occurred_at, created_at
+          ) values (
+            $1::uuid, $2::uuid, $3::uuid, 'status_changed', $4,
+            $5::jsonb, $6::jsonb, $7::jsonb, $8::timestamptz, $9::timestamptz
+          )
+        `, [context.organizationId, options.leadId, context.employeeId,
+          `Status changed to ${String(nextStatus.name)}`,
+          JSON.stringify({ statusId: leadRow.status_id, version: currentVersion }),
+          JSON.stringify({ statusId: options.input.statusId, version: currentVersion + 1 }),
+          JSON.stringify(metadata), options.input.occurredAt, options.at]);
+      }
+
+      const nextIsWon = options.input.statusId ? nextStatus.is_won === true : leadRow.status_is_won === true;
+      const nextIsLost = options.input.statusId ? nextStatus.is_lost === true : leadRow.status_is_lost === true;
+      const updated = await client.query<DbRow>(`
+        update callora.leads
+        set status_id = $4::uuid,
+            converted_at = case when $5::boolean then coalesce(converted_at, $8::timestamptz) else null end,
+            lost_at = case when $6::boolean then coalesce(lost_at, $8::timestamptz) else null end,
+            next_follow_up_at = case
+              when $7::timestamptz is null then next_follow_up_at
+              when next_follow_up_at is null then $7::timestamptz
+              else least(next_follow_up_at, $7::timestamptz)
+            end,
+            updated_by_user_id = $9::uuid,
+            updated_at = $8::timestamptz,
+            version = version + 1
+        where organization_id = $1::uuid and id = $2::uuid
+          and assigned_employee_id = $3::uuid and version = $10::bigint
+        returning version
+      `, [context.organizationId, options.leadId, context.employeeId,
+        options.input.statusId ?? leadRow.status_id, nextIsWon,
+        nextIsLost, options.input.followUp?.dueAt ?? null,
+        options.at, actorUserId, currentVersion]);
+      const appliedLeadVersion = Number(updated.rows[0]?.version);
+      if (!Number.isSafeInteger(appliedLeadVersion)) throw domainConflict("The lead changed; refresh and retry");
+
+      await this.insertOutboxEvent(client, context.organizationId, "lead", options.leadId, "lead.mobile_updated", {
+        leadId: options.leadId,
+        employeeId: context.employeeId,
+        deviceId: context.deviceId,
+        requestId: options.input.requestId,
+        appliedLeadVersion,
+      });
+      if (followUpId) {
+        await this.insertOutboxEvent(client, context.organizationId, "follow_up", followUpId, "follow_up.created", {
+          followUpId,
+          leadId: options.leadId,
+          employeeId: context.employeeId,
+        });
+      }
+      await client.query(`
+        insert into callora.audit_events (
+          id, organization_id, actor_device_id, action, entity_type, entity_id,
+          request_id, metadata, occurred_at, created_at
+        ) values (
+          $1::uuid, $2::uuid, $3::uuid, 'lead.mobile_updated', 'lead', $4::uuid,
+          $5, $6::jsonb, $7::timestamptz, $7::timestamptz
+        )
+      `, [randomUUID(), context.organizationId, context.deviceId, options.leadId,
+        options.input.requestId, JSON.stringify({ employeeId: context.employeeId, appliedLeadVersion }), options.at]);
+      await client.query(`
+        update callora.api_idempotency_keys
+        set response_status = 200, response_body = $3::jsonb
+        where organization_id = $1::uuid and scope = 'mobile.lead.update'
+          and idempotency_key = $2
+      `, [context.organizationId, idempotencyKey,
+        JSON.stringify({ requestId: options.input.requestId, appliedLeadVersion })]);
+
+      const detail = await this.findLeadDetailWithClient(
+        client,
+        context.organizationId,
+        { kind: "assigned", employeeId: context.employeeId },
+        options.leadId,
+        options.at,
+      );
+      if (!detail) throw new Error("Updated mobile lead disappeared inside its tenant transaction");
+      return {
+        requestId: options.input.requestId,
+        replayed: false,
+        appliedLeadVersion,
+        detail,
+      };
+    });
+  }
+
+  async getLeadReport(options: LeadReportOptions): Promise<LeadReport> {
+    if (!isCanonicalUuid(options.organizationId) ||
+      options.filter.employeeId !== undefined && !isCanonicalUuid(options.filter.employeeId) ||
+      options.filter.source !== undefined && !isLeadSource(options.filter.source)) {
+      throw new Error("Lead report filter is invalid");
+    }
+    return this.withTenant(options.organizationId, undefined, async (client) => {
+      const reportQuery = async (selectSql: string): Promise<DbRow[]> => {
+        const values: unknown[] = [
+          options.organizationId,
+          options.filter.from,
+          options.filter.to,
+          options.filter.employeeId ?? null,
+          options.filter.team ?? null,
+          options.filter.source ?? null,
+          options.at,
+          options.timeZone,
+        ];
+        const scope = leadScopePredicate(options.scope, values);
+        const result = await client.query<DbRow>(`
+          with cohort as materialized (
+            select lead.*, lead_status.name as status_name,
+              lead_status.is_won as status_is_won, lead_status.is_lost as status_is_lost,
+              employee.display_name as employee_display_name,
+              first_response.first_response_seconds
+            from callora.leads as lead
+            join callora.lead_statuses as lead_status
+              on lead_status.organization_id = lead.organization_id and lead_status.id = lead.status_id
+            join callora.teams as lead_team
+              on lead_team.organization_id = lead.organization_id and lead_team.id = lead.team_id
+            left join callora.employees as employee
+              on employee.organization_id = lead.organization_id and employee.id = lead.assigned_employee_id
+            -- First response is the earliest answered call on the current
+            -- (possibly corrected) active link. Historical unlinked calls and
+            -- calls answered before lead creation do not enter the metric.
+            left join lateral (
+              select extract(epoch from (call_log.answered_at - lead.created_at))::double precision
+                as first_response_seconds
+              from callora.call_lead_links as active_link
+              join callora.call_logs as call_log
+                on call_log.organization_id = active_link.organization_id
+               and call_log.id = active_link.call_log_id
+              where active_link.organization_id = lead.organization_id
+                and active_link.lead_id = lead.id
+                and active_link.unlinked_at is null
+                and call_log.disposition = 'answered'
+                and call_log.answered_at is not null
+                and call_log.answered_at >= lead.created_at
+              order by call_log.answered_at, call_log.id
+              limit 1
+            ) as first_response on true
+            where lead.organization_id = $1::uuid and lead.archived_at is null
+              and lead.created_at >= $2::timestamptz and lead.created_at < $3::timestamptz
+              and ($4::uuid is null or lead.assigned_employee_id = $4::uuid)
+              and ($5::text is null or lead_team.name = $5)
+              and ($6::text is null or lead.source = $6)
+              and ${scope}
+          )
+          ${selectSql}
+        `, values);
+        return result.rows;
+      };
+
+      const [kpiRows, pipelineRows, trendRows, ownerRows, sourceRows] = await Promise.all([
+        reportQuery(`
+          select count(*)::integer as total_leads,
+            count(*) filter (where converted_at is not null)::integer as converted_leads,
+            round(avg(first_response_seconds))::bigint as average_first_response_seconds,
+            coalesce((
+              select count(*)::integer
+              from callora.lead_follow_ups as follow_up
+              join cohort on cohort.organization_id = follow_up.organization_id
+                and cohort.id = follow_up.lead_id
+              where follow_up.status = 'pending' and follow_up.due_at <= $7::timestamptz
+            ), 0)::integer as follow_ups_due
+          from cohort
+        `),
+        reportQuery(`
+          select status.id as status_id, status.name as status_name, status.color,
+            status.is_won, status.is_lost, count(cohort.id)::integer as lead_count
+          from callora.lead_statuses as status
+          left join cohort on cohort.organization_id = status.organization_id
+            and cohort.status_id = status.id
+          where status.organization_id = $1::uuid and status.is_active
+          group by status.id
+          order by status.position, status.id
+        `),
+        reportQuery(`
+          select (date_trunc('day', created_at at time zone $8) at time zone $8) as bucket_start,
+            count(*)::integer as created,
+            count(*) filter (where converted_at is not null)::integer as won
+          from cohort
+          group by bucket_start
+          order by bucket_start
+        `),
+        reportQuery(`
+          select assigned_employee_id as employee_id,
+            coalesce(max(employee_display_name), 'Unassigned') as display_name,
+            count(*)::integer as assigned,
+            count(*) filter (where last_contacted_at is not null)::integer as contacted,
+            count(*) filter (where converted_at is not null)::integer as won,
+            round(avg(first_response_seconds))::bigint as average_response_seconds,
+            coalesce(sum((
+              select count(*)::integer
+              from callora.lead_follow_ups as follow_up
+              where follow_up.organization_id = cohort.organization_id
+                and follow_up.lead_id = cohort.id
+                and follow_up.status = 'pending' and follow_up.due_at < $7::timestamptz
+            )), 0)::integer as overdue_follow_ups
+          from cohort
+          group by assigned_employee_id
+          order by lower(coalesce(max(employee_display_name), 'Unassigned')), assigned_employee_id nulls first
+        `),
+        reportQuery(`
+          select source, count(*)::integer as leads,
+            count(*) filter (where last_contacted_at is not null)::integer as contacted,
+            count(*) filter (where lower(status_name) = 'qualified')::integer as qualified,
+            count(*) filter (where converted_at is not null)::integer as won
+          from cohort
+          group by source
+          order by count(*) desc, source
+        `),
+      ]);
+      const kpi = kpiRows[0] ?? {};
+      const totalLeads = Number(kpi.total_leads ?? 0);
+      const convertedLeads = Number(kpi.converted_leads ?? 0);
+      const percentage = (value: number, denominator = totalLeads): number =>
+        denominator === 0 ? 0 : Math.round(value * 10_000 / denominator) / 100;
+      return {
+        filter: options.filter,
+        kpis: {
+          totalLeads,
+          convertedLeads,
+          conversionRate: percentage(convertedLeads),
+          followUpsDue: Number(kpi.follow_ups_due ?? 0),
+          ...(kpi.average_first_response_seconds === null || kpi.average_first_response_seconds === undefined
+            ? {}
+            : { averageFirstResponseSeconds: Number(kpi.average_first_response_seconds) }),
+        },
+        pipeline: pipelineRows.map((row) => ({
+          statusId: String(row.status_id),
+          statusName: String(row.status_name),
+          color: String(row.color),
+          leadCount: Number(row.lead_count),
+          percentageOfTotal: percentage(Number(row.lead_count)),
+          isWon: row.is_won === true,
+          isLost: row.is_lost === true,
+        })),
+        trend: trendRows.map((row) => ({
+          bucketStart: new Date(String(row.bucket_start)).toISOString(),
+          created: Number(row.created),
+          won: Number(row.won),
+        })),
+        owners: ownerRows.map((row) => {
+          const assigned = Number(row.assigned);
+          const won = Number(row.won);
+          return {
+            employeeId: typeof row.employee_id === "string" ? row.employee_id : null,
+            displayName: String(row.display_name),
+            assigned,
+            contacted: Number(row.contacted),
+            won,
+            conversionRate: percentage(won, assigned),
+            overdueFollowUps: Number(row.overdue_follow_ups),
+            ...(row.average_response_seconds === null || row.average_response_seconds === undefined
+              ? {}
+              : { averageResponseSeconds: Number(row.average_response_seconds) }),
+          };
+        }),
+        sources: sourceRows.map((row) => {
+          const leads = Number(row.leads);
+          const won = Number(row.won);
+          return {
+            source: String(row.source) as LeadSource,
+            leads,
+            contacted: Number(row.contacted),
+            qualified: Number(row.qualified),
+            won,
+            conversionRate: percentage(won, leads),
+            percentageOfTotal: percentage(leads),
+          };
+        }),
+        generatedAt: options.at,
+        timeZone: options.timeZone,
+        metricDefinitionVersion: "2026-07-15",
+      };
+    });
+  }
+
   async findDevice(organizationId: OrganizationId, deviceId: string): Promise<EmployeeDevice | undefined> {
     if (!isCanonicalUuid(organizationId) || !isCanonicalUuid(deviceId)) return undefined;
     return this.withTenant(organizationId, undefined, (client) =>
@@ -3010,57 +5099,22 @@ export class PostgresCalloraRepository implements CalloraRepository {
     ] as const) assertTrustedUuid(value, name);
     if (options.context.credentialType !== "session") return undefined;
     return this.withTenant(options.context.organizationId, undefined, async (client) => {
-      const current = await client.query<DbRow>(`
-        select
-          device.call_log_permission,
-          device.phone_state_permission,
-          device.contacts_permission,
-          device.notifications_permission,
-          device.recording_files_permission,
-          device.background_execution_permission,
-          current_policy.id as current_policy_id,
-          encode(current_policy.content_hash, 'hex') as current_policy_content_hash,
-          callora.device_has_current_collection_consent(
-            credential.organization_id, credential.device_id, $5::timestamptz
-          ) as consent_current
-        from callora.device_credentials as credential
-        join callora.employee_devices as device
-          on device.organization_id = credential.organization_id
-         and device.id = credential.device_id
-        join callora.employees as employee
-          on employee.organization_id = credential.organization_id
-         and employee.id = credential.employee_id
-        join callora.organizations as organization
-          on organization.id = credential.organization_id
-        join callora.device_consent_receipts as consent
-          on consent.organization_id = credential.organization_id
-         and consent.device_id = credential.device_id
-         and consent.withdrawn_at is null
-        left join lateral callora.resolve_mobile_collection_policy(
-          device.collection_mode, 'call_metadata', $5::timestamptz
-        ) as current_policy on true
-        where credential.organization_id = $1::uuid
-          and credential.id = $2::uuid
-          and credential.device_id = $3::uuid
-          and credential.employee_id = $4::uuid
-          and credential.credential_type = 'session'
-          and credential.lifecycle_state = 'active'
-          and credential.consumed_at is null
-          and credential.revoked_at is null
-          and credential.expires_at > $5::timestamptz
-          and device.status = 'connected'
-          and employee.status = 'active'
-          and organization.status in ('trial', 'active')
-        for update of credential, device, employee, organization, consent
-      `, [
-        options.context.organizationId,
-        options.context.credentialId,
-        options.context.deviceId,
-        options.context.employeeId,
-        options.at,
-      ]);
-      const currentRow = current.rows[0];
-      if (!currentRow) return undefined;
+      const trust = await this.lockActiveMobileTrustWithClient(
+        client, options.context, options.at, false,
+      );
+      if (!trust) return undefined;
+      const currentPolicy = await client.query<DbRow>(`
+        select policy.id as current_policy_id,
+          encode(policy.content_hash, 'hex') as current_policy_content_hash
+        from callora.resolve_mobile_collection_policy(
+          $1, 'call_metadata', $2::timestamptz
+        ) as policy
+      `, [trust.device.collection_mode, options.at]);
+      const currentRow: DbRow = {
+        ...trust.device,
+        ...currentPolicy.rows[0],
+        consent_current: trust.consentCurrent,
+      };
       const priorPermissions = permissionsFromRow(currentRow);
       const permissionChanged = JSON.stringify(priorPermissions) !== JSON.stringify(options.heartbeat.permissions);
       const permission = options.heartbeat.permissions;
@@ -3142,52 +5196,12 @@ export class PostgresCalloraRepository implements CalloraRepository {
     const callPiiCrypto = this.requireCallPiiCrypto();
     try {
       return await this.withTenant(options.context.organizationId, undefined, async (client) => {
-        const authenticated = await client.query<DbRow>(`
-          select
-            credential.id,
-            callora.device_has_current_collection_consent(
-              credential.organization_id, credential.device_id, $5::timestamptz
-            ) as consent_current
-          from callora.device_credentials as credential
-          join callora.employee_devices as device
-            on device.organization_id = credential.organization_id
-           and device.id = credential.device_id
-          join callora.employees as employee
-            on employee.organization_id = credential.organization_id
-           and employee.id = credential.employee_id
-          join callora.organizations as organization
-            on organization.id = credential.organization_id
-          join callora.device_consent_receipts as consent
-            on consent.organization_id = credential.organization_id
-           and consent.device_id = credential.device_id
-           and consent.withdrawn_at is null
-          where credential.organization_id = $1::uuid
-            and credential.id = $2::uuid
-            and credential.device_id = $3::uuid
-            and credential.employee_id = $4::uuid
-            and credential.credential_type = 'session'
-            and credential.lifecycle_state = 'active'
-            and credential.consumed_at is null
-            and credential.revoked_at is null
-            and credential.expires_at > $5::timestamptz
-            and device.status = 'connected'
-            and employee.status = 'active'
-            and organization.status in ('trial', 'active')
-            and (device.call_log_permission = 'granted' or $6::boolean = true)
-            and device.collection_mode = $7
-          for update of credential, device, employee, organization, consent
-        `, [
-          options.context.organizationId,
-          options.context.credentialId,
-          options.context.deviceId,
-          options.context.employeeId,
-          options.at,
-          options.allowWithoutCallLogPermission,
-          options.batch.collectionMode,
-        ]);
-        const authenticatedRow = authenticated.rows[0];
-        if (!authenticatedRow) return undefined;
-        if (authenticatedRow.consent_current !== true) throw domainConsentRequired();
+        const trust = await this.lockActiveMobileTrustWithClient(
+          client, options.context, options.at,
+        );
+        if (!trust ||
+          trust.device.call_log_permission !== "granted" && !options.allowWithoutCallLogPermission ||
+          trust.device.collection_mode !== options.batch.collectionMode) return undefined;
 
         const registration = await client.query<DbRow>(`
           select callora.register_call_ingest_batch(

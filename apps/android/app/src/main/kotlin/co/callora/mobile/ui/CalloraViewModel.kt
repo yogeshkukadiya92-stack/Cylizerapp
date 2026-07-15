@@ -30,7 +30,12 @@ import co.callora.mobile.data.api.BootstrapCredential
 import co.callora.mobile.data.api.AssignedLead
 import co.callora.mobile.data.api.AssignedLeadSummary
 import co.callora.mobile.data.api.DeviceRegistration
+import co.callora.mobile.data.api.LeadUpdateDraft
+import co.callora.mobile.data.api.MobileLeadStatus
 import co.callora.mobile.data.api.MobileApiException
+import co.callora.mobile.data.local.LeadMutationEnqueueResult
+import co.callora.mobile.data.local.LeadMutationEnqueueGate
+import co.callora.mobile.data.local.LeadMutationEnqueueGateDecision
 import co.callora.mobile.data.local.QueueCounts
 import co.callora.mobile.sync.SyncScheduler
 import java.time.Instant
@@ -48,6 +53,11 @@ import kotlinx.coroutines.withContext
 
 enum class ReadySection { LEADS, STATUS, DIAGNOSTICS, SETTINGS }
 
+data class LeadUpdateComposer(
+    val lead: AssignedLead,
+    val postCall: Boolean,
+)
+
 data class CalloraUiState(
     val onboarding: OnboardingSnapshot = OnboardingSnapshot(
         permissionRequired = VariantCapabilities.requiresCallLogPermission,
@@ -63,6 +73,12 @@ data class CalloraUiState(
     val leadsLoading: Boolean = false,
     val leadsErrorCode: String? = null,
     val leadsGeneratedAt: String? = null,
+    val leadStatuses: List<MobileLeadStatus> = emptyList(),
+    val pendingLeadMutationIds: Set<String> = emptySet(),
+    val conflictedLeadMutationIds: Set<String> = emptySet(),
+    val rejectedLeadMutationIds: Set<String> = emptySet(),
+    val leadUpdateComposer: LeadUpdateComposer? = null,
+    val leadMutationSaving: Boolean = false,
     val queueCounts: QueueCounts = QueueCounts(0, 0, 0),
     val lastSuccessfulSyncAt: String? = null,
     val recentErrors: List<String> = emptyList(),
@@ -80,6 +96,7 @@ class CalloraViewModel(
     private val _state = MutableStateFlow(CalloraUiState())
     val state: StateFlow<CalloraUiState> = _state.asStateFlow()
     private val protocolMutex = Mutex()
+    private val postDialReturn = PostDialReturnTracker()
 
     init {
         viewModelScope.launch {
@@ -125,6 +142,25 @@ class CalloraViewModel(
             refreshNow()
             if (protocol.hasPendingMutation || protocol.phase == ProtocolPhase.RECONSENT_POLICY_PENDING) {
                 executeProtocol { resumeProtocol(protocol) }
+            }
+        }
+        viewModelScope.launch {
+            var previousPending = emptySet<String>()
+            container.leadMutations.observeQueueState().collect { queueState ->
+                val completed = previousPending - queueState.pendingLeadIds
+                previousPending = queueState.pendingLeadIds
+                _state.update {
+                    it.copy(
+                        pendingLeadMutationIds = queueState.pendingLeadIds,
+                        conflictedLeadMutationIds = queueState.conflictedLeadIds,
+                        rejectedLeadMutationIds = queueState.rejectedLeadIds,
+                    )
+                }
+                if (completed.isNotEmpty() && state.value.onboarding.stage == OnboardingStage.READY &&
+                    !state.value.leadsLoading
+                ) {
+                    container.credentialVault.read()?.let { loadAssignedLeads(it) }
+                }
             }
         }
     }
@@ -232,8 +268,100 @@ class CalloraViewModel(
         }
     }
 
+    fun openLeadUpdate(leadId: String, postCall: Boolean = false) {
+        val lead = state.value.assignedLeads.firstOrNull { it.id == leadId }
+        if (lead == null) {
+            _state.update { it.copy(errorCode = "LEAD_NOT_AVAILABLE") }
+            return
+        }
+        if (leadId in state.value.pendingLeadMutationIds) {
+            _state.update { it.copy(message = "An update for this lead is already waiting to sync.") }
+            return
+        }
+        _state.update {
+            it.copy(
+                leadUpdateComposer = LeadUpdateComposer(lead, postCall),
+                errorCode = null,
+            )
+        }
+    }
+
+    fun dismissLeadUpdate() {
+        if (!state.value.leadMutationSaving) _state.update { it.copy(leadUpdateComposer = null) }
+    }
+
+    fun submitLeadUpdate(draft: LeadUpdateDraft) {
+        if (state.value.leadMutationSaving) return
+        _state.update { it.copy(leadMutationSaving = true, errorCode = null, message = null) }
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    container.collectionMutex.withLock {
+                        val protocol = runCatching { container.protocolVault.read() }.getOrNull()
+                        val decision = LeadMutationEnqueueGate.evaluate(
+                            phase = protocol?.phase,
+                            hasPolicy = protocol?.policy != null,
+                            hasConsent = protocol?.consent != null,
+                            disclosureAccepted = container.preferences.disclosureAccepted,
+                            consentStale = container.preferences.consentStale,
+                            revoked = container.preferences.revoked,
+                            credentials = container.credentialVault.read(),
+                        )
+                        when (decision) {
+                            is LeadMutationEnqueueGateDecision.Open ->
+                                container.leadMutations.enqueue(decision.credentials, draft)
+                            LeadMutationEnqueueGateDecision.Closed -> error("LEAD_UPDATE_GATE_CLOSED")
+                        }
+                    }
+                }
+                SyncScheduler.runLeadMutationsNow(getApplication())
+                _state.update {
+                    it.copy(
+                        leadMutationSaving = false,
+                        leadUpdateComposer = null,
+                        message = when (result) {
+                            is LeadMutationEnqueueResult.Queued -> "Lead update queued securely."
+                            is LeadMutationEnqueueResult.AlreadyPending ->
+                                "An update for this lead is already waiting to sync."
+                        },
+                    )
+                }
+            } catch (error: Throwable) {
+                SafeLog.warn("CalloraUi", "Lead update enqueue failed", error)
+                val code = error.message?.takeIf { value -> value.matches(Regex("^[A-Z0-9_]+$")) }
+                    ?: "LEAD_UPDATE_INVALID"
+                _state.update {
+                    it.copy(
+                        leadMutationSaving = false,
+                        leadUpdateComposer = if (code == "LEAD_UPDATE_GATE_CLOSED") null else it.leadUpdateComposer,
+                        errorCode = code,
+                    )
+                }
+            }
+        }
+    }
+
+    /** Called immediately before ACTION_DIAL; it does not imply that a call occurred. */
+    fun markDialerLaunch(leadId: String) {
+        postDialReturn.launched(leadId)
+    }
+
+    fun onHostStopped() {
+        postDialReturn.hostStopped()
+    }
+
+    fun onHostResumed() {
+        postDialReturn.hostResumed()?.let { openLeadUpdate(it, postCall = true) }
+    }
+
+    fun dialLaunchFailed() {
+        postDialReturn.failed()
+        _state.update { it.copy(errorCode = "DIAL_UNAVAILABLE") }
+    }
+
     fun syncNow() {
         SyncScheduler.runNow(getApplication())
+        SyncScheduler.runLeadMutationsNow(getApplication())
         refresh(message = "Sync scheduled when a network is available.")
     }
 
@@ -849,8 +977,11 @@ class CalloraViewModel(
                 leadSummary = if (snapshot.stage == OnboardingStage.READY) it.leadSummary
                 else AssignedLeadSummary(0, 0, 0, 0),
                 leadsGeneratedAt = if (snapshot.stage == OnboardingStage.READY) it.leadsGeneratedAt else null,
+                leadStatuses = if (snapshot.stage == OnboardingStage.READY) it.leadStatuses else emptyList(),
                 leadsLoading = if (snapshot.stage == OnboardingStage.READY) it.leadsLoading else false,
                 leadsErrorCode = if (snapshot.stage == OnboardingStage.READY) it.leadsErrorCode else null,
+                leadUpdateComposer = if (snapshot.stage == OnboardingStage.READY) it.leadUpdateComposer else null,
+                leadMutationSaving = if (snapshot.stage == OnboardingStage.READY) it.leadMutationSaving else false,
             )
         }
         if (snapshot.stage == OnboardingStage.READY) {
@@ -866,11 +997,13 @@ class CalloraViewModel(
     private suspend fun loadAssignedLeads(credentials: DeviceCredentials) {
         _state.update { it.copy(leadsLoading = true, leadsErrorCode = null) }
         try {
+            val statuses = container.api.listLeadStatuses(credentials)
             val page = container.api.listAssignedLeads(credentials)
             _state.update {
                 it.copy(
                     assignedLeads = page.items,
                     leadSummary = page.summary,
+                    leadStatuses = statuses,
                     leadsGeneratedAt = page.generatedAt,
                     leadsLoading = false,
                     leadsErrorCode = null,
@@ -884,6 +1017,7 @@ class CalloraViewModel(
                 it.copy(
                     assignedLeads = if (mustClear) emptyList() else it.assignedLeads,
                     leadSummary = if (mustClear) AssignedLeadSummary(0, 0, 0, 0) else it.leadSummary,
+                    leadStatuses = if (mustClear) emptyList() else it.leadStatuses,
                     leadsGeneratedAt = if (mustClear) null else it.leadsGeneratedAt,
                     leadsLoading = false,
                     leadsErrorCode = code,

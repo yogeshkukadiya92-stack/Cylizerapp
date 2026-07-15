@@ -261,7 +261,11 @@ revoke all on
   callora.lead_notes,
   callora.lead_follow_ups,
   callora.lead_activities,
-  callora.call_lead_links
+  callora.call_lead_links,
+  callora.lead_assignment_rules,
+  callora.lead_assignment_rule_employees,
+  callora.lead_import_jobs,
+  callora.lead_import_rows
 from
   callora_api, callora_ingest, callora_auditor, callora_worker,
   callora_call_writer, callora_pii_migrator;
@@ -275,6 +279,12 @@ grant select, insert, update on
   callora.call_lead_links
 to callora_api;
 grant select, insert on callora.lead_activities to callora_api;
+grant select, insert, update on
+  callora.lead_assignment_rules,
+  callora.lead_import_jobs,
+  callora.lead_import_rows
+to callora_api;
+grant select, insert, update, delete on callora.lead_assignment_rule_employees to callora_api;
 
 grant select on
   callora.organizations,
@@ -364,6 +374,10 @@ grant select on
   callora.lead_follow_ups,
   callora.lead_activities,
   callora.call_lead_links,
+  callora.lead_assignment_rules,
+  callora.lead_assignment_rule_employees,
+  callora.lead_import_jobs,
+  callora.lead_import_rows,
   callora.audit_events,
   callora.outbox_events
 to callora_auditor;

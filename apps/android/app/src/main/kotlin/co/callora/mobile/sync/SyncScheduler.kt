@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit
 
 object SyncScheduler {
     private const val UNIQUE_NOW = "callora-call-sync-now"
+    private const val UNIQUE_LEAD_MUTATIONS_NOW = "callora-lead-mutation-sync-now"
     private const val UNIQUE_PERIODIC = "callora-call-sync-periodic"
 
     private val constraints = Constraints.Builder()
@@ -27,6 +28,18 @@ object SyncScheduler {
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             UNIQUE_NOW,
+            ExistingWorkPolicy.KEEP,
+            request,
+        )
+    }
+
+    fun runLeadMutationsNow(context: Context) {
+        val request = OneTimeWorkRequestBuilder<LeadMutationWorker>()
+            .setConstraints(constraints)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            UNIQUE_LEAD_MUTATIONS_NOW,
             ExistingWorkPolicy.KEEP,
             request,
         )
@@ -48,6 +61,7 @@ object SyncScheduler {
 
     fun cancel(context: Context) {
         WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_NOW)
+        WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_LEAD_MUTATIONS_NOW)
         WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_PERIODIC)
     }
 }

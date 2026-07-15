@@ -10,6 +10,7 @@ class SyncTickWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
         SyncScheduler.runNow(applicationContext)
+        SyncScheduler.runLeadMutationsNow(applicationContext)
         return Result.success()
     }
 }
