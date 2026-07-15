@@ -76,3 +76,4 @@ export { ResendEmailProvider } from "./resend-email-provider.js";
 export { renderPdf, renderXlsx, MAX_REPORT_BYTES, MAX_REPORT_ROWS } from "./report-renderers.js";
 export { EncryptedS3ReportArtifactStore, type S3ArtifactConfig } from "./s3-artifact-store.js";
 export { InMemoryRecordingObjectStore, RecordingService, type RecordingManifest, type RecordingObjectStore, type RecordingPolicy, type TranscriptionProvider } from "./recording-service.js";
+export { ApiKeyService, ConnectorRunner, CustomerWebhookQueue, StripeBillingProvider, SubscriptionService, signCustomerWebhook, verifySignedWebhook, type ApiScope, type CommercialPlan, type ConnectorCredentialVault, type SubscriptionState } from "./commercial-platform.js";

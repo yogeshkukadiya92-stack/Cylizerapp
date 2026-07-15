@@ -21,6 +21,7 @@ apps/web/vitest.config.d.ts
 .gradle/
 .kotlin/
 **/build/
+**/.build/
 local.properties
 .idea/
 captures/
