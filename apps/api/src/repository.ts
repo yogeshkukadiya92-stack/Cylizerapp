@@ -189,6 +189,7 @@ export interface CalloraRepository {
   updateNotificationPreferences(options: { organizationId: OrganizationId; userId: string; preferences: NotificationPreference[]; at: string }): Promise<NotificationPreference[]>;
   createReportExportJob(options: { organizationId: OrganizationId; userId: string; kind: ReportExportJob["kind"]; format: ReportExportJob["format"]; parameters: Record<string, unknown>; at: string }): Promise<ReportExportJob>;
   completeReportExportJob(options: { organizationId: OrganizationId; jobId: string; objectKey: string; tokenHash: Uint8Array; expiresAt: string; at: string }): Promise<boolean>;
+  issueReportDownloadToken(options: { organizationId: OrganizationId; userId: string; jobId: string; tokenHash: Uint8Array; expiresAt: string; at: string }): Promise<boolean>;
   redeemReportDownload(options: { organizationId: OrganizationId; userId: string; jobId: string; tokenHash: Uint8Array; redemptionId: string; at: string }): Promise<{ objectKey: string; expiresAt: string } | undefined>;
   listNotificationInbox(organizationId: OrganizationId, userId: string, limit: number): Promise<NotificationInbox>;
   markNotificationRead(options: { organizationId: OrganizationId; userId: string; notificationId: string; at: string }): Promise<InAppNotification | undefined>;
@@ -543,6 +544,7 @@ export class InMemoryCalloraRepository implements CalloraRepository {
   private readonly reportSchedules = new Map<string, ReportSchedule>();
   private readonly notificationPreferences = new Map<string, NotificationPreference[]>();
   private readonly reportExportJobs = new Map<string, ReportExportJob>();
+  private readonly reportExportOwners = new Map<string, string>();
   private readonly reportArtifacts = new Map<string, { objectKey: string; tokenHash: Uint8Array; expiresAt: string; redeemedAt?: string }>();
   private readonly inAppNotifications = new Map<string, InAppNotification & { organizationId: OrganizationId; userId: string }>();
   private readonly callLeadCorrectionRequests = new Map<string, { fingerprint: string; result: CorrectCallLeadLinkResult }>();
@@ -2286,11 +2288,18 @@ export class InMemoryCalloraRepository implements CalloraRepository {
     const publicId = this.ids.next("report_export");
     const job: ReportExportJob = { id: `${options.organizationId}:${publicId}`, kind: options.kind, format: options.format, status: "queued", requestedAt: options.at };
     this.reportExportJobs.set(job.id, job);
+    this.reportExportOwners.set(job.id, options.userId);
     return { ...clone(job), id: publicId };
   }
 
   async completeReportExportJob(options: { organizationId: OrganizationId; jobId: string; objectKey: string; tokenHash: Uint8Array; expiresAt: string; at: string }): Promise<boolean> {
     const key=`${options.organizationId}:${options.jobId}`; const job=this.reportExportJobs.get(key); if(!job||job.status!=="queued"&&job.status!=="processing")return false; job.status="ready"; job.completedAt=options.at; job.expiresAt=options.expiresAt; this.reportArtifacts.set(key,{objectKey:options.objectKey,tokenHash:new Uint8Array(options.tokenHash),expiresAt:options.expiresAt}); return true;
+  }
+
+  async issueReportDownloadToken(options: { organizationId: OrganizationId; userId: string; jobId: string; tokenHash: Uint8Array; expiresAt: string; at: string }): Promise<boolean> {
+    const key=`${options.organizationId}:${options.jobId}`; const job=this.reportExportJobs.get(key); const artifact=this.reportArtifacts.get(key);
+    if(!job||!artifact||job.status!=="ready"||this.reportExportOwners.get(key)!==options.userId||options.tokenHash.length!==32||artifact.redeemedAt)return false;
+    artifact.tokenHash=new Uint8Array(options.tokenHash); artifact.expiresAt=options.expiresAt; job.expiresAt=options.expiresAt; return true;
   }
 
   async redeemReportDownload(options: { organizationId: OrganizationId; userId: string; jobId: string; tokenHash: Uint8Array; redemptionId: string; at: string }): Promise<{ objectKey: string; expiresAt: string } | undefined> {

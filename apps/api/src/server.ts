@@ -11,6 +11,7 @@ import {
   UuidIdGenerator,
 } from "./postgres/index.js";
 import { SystemClock } from "./security.js";
+import { FileSystemReportArtifactReader } from "./report-worker.js";
 
 let activeApp: FastifyInstance | undefined;
 let activeRepository: PostgresCalloraRepository | undefined;
@@ -73,6 +74,7 @@ try {
       ),
       idGenerator: new UuidIdGenerator(),
       oidcVerifier: new ProductionOidcBearerVerifier(loadOidcVerifierConfig()),
+      ...(process.env.REPORT_ARTIFACT_ROOT?.trim() ? { reportArtifactReader: new FileSystemReportArtifactReader(process.env.REPORT_ARTIFACT_ROOT) } : {}),
     });
   } else {
     activeApp = buildApp({ config });

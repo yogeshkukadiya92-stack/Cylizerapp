@@ -5,6 +5,8 @@ export {
   type PostgresSslMode,
 } from "./tls.js";
 export { PostgresPairingAttemptLimiter } from "./limiter.js";
+export { PostgresReportWorkerRepository } from "./report-worker-repository.js";
+export { PostgresReportRowLoader } from "./report-row-loader.js";
 export {
   isCanonicalUuid,
   PostgresCalloraRepository,

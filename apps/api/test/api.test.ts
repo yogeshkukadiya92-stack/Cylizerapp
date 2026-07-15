@@ -129,6 +129,7 @@ describe("Callora API", () => {
       clock,
       idGenerator: new SequentialIdGenerator(),
       pairingCodeGenerator: new SequentialPairingCodeGenerator(),
+      reportArtifactReader: { get: async () => ({ body: new TextEncoder().encode("xlsx-bytes"), contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName: "callora-report.xlsx" }) },
       logger: false,
     });
   });
@@ -1588,13 +1589,15 @@ describe("Callora API", () => {
       expect(preferenceResponse.statusCode).toBe(200);
       const exportResponse = await app.inject({ method: "POST", url: "/v1/report-exports", headers: authorization(token), payload: { kind: "lead_performance", format: "xlsx", parameters: { period: "this_month" } } });
       expect(exportResponse.statusCode).toBe(202);
-      const exportJob=json<SuccessPayload<{id:string}>>(exportResponse).data; const downloadToken=createDownloadToken(); expect(await repository.completeReportExportJob({organizationId:"org_alpha",jobId:exportJob.id,objectKey:"reports/org_alpha/export.xlsx",tokenHash:hashDownloadToken(downloadToken),expiresAt:"2026-07-16T12:00:00.000Z",at:"2026-07-14T12:05:00.000Z"})).toBe(true);
-      const redemption=await app.inject({method:"POST",url:`/v1/report-downloads/${exportJob.id}/redeem`,headers:authorization(token),payload:{token:downloadToken}}); expect(redemption.statusCode).toBe(200); expect(json<SuccessPayload<{objectKey:string}>>(redemption).data.objectKey).toBe("reports/org_alpha/export.xlsx");
+      const exportJob=json<SuccessPayload<{id:string}>>(exportResponse).data; const initialToken=createDownloadToken(); expect(await repository.completeReportExportJob({organizationId:"org_alpha",jobId:exportJob.id,objectKey:"reports/org_alpha/export.xlsx",tokenHash:hashDownloadToken(initialToken),expiresAt:"2026-07-16T12:00:00.000Z",at:"2026-07-14T12:05:00.000Z"})).toBe(true); const tokenResponse=await app.inject({method:"POST",url:`/v1/report-downloads/${exportJob.id}/token`,headers:authorization(token)}); expect(tokenResponse.statusCode).toBe(200); const downloadToken=json<SuccessPayload<{token:string}>>(tokenResponse).data.token;
+      const redemption=await app.inject({method:"POST",url:`/v1/report-downloads/${exportJob.id}/redeem`,headers:authorization(token),payload:{token:downloadToken}}); expect(redemption.statusCode).toBe(200); expect(redemption.body).toBe("xlsx-bytes"); expect(redemption.headers["content-disposition"]).toBe('attachment; filename="callora-report.xlsx"'); expect(redemption.headers["cache-control"]).toBe("no-store");
       const replay=await app.inject({method:"POST",url:`/v1/report-downloads/${exportJob.id}/redeem`,headers:authorization(token),payload:{token:downloadToken}}); expect(replay.statusCode).toBe(404);
+      const replacement=await app.inject({method:"POST",url:`/v1/report-downloads/${exportJob.id}/token`,headers:authorization(token)}); expect(replacement.statusCode).toBe(404);
       const snapshot = await app.inject({ method: "GET", url: "/v1/report-automation", headers: authorization(token) });
       const data = json<SuccessPayload<{ savedViews: unknown[]; schedules: Array<{ status: string }>; preferences: unknown[]; jobs: unknown[] }>>(snapshot).data;
       expect(data.savedViews).toHaveLength(1); expect(data.schedules).toHaveLength(1); expect(data.schedules[0]!.status).toBe("paused"); expect(data.preferences).toHaveLength(5); expect(data.jobs).toHaveLength(1);
       const betaToken = await session(app, "org_beta", "owner");
+      const crossTenantToken=await app.inject({method:"POST",url:`/v1/report-downloads/${exportJob.id}/token`,headers:authorization(betaToken)}); expect(crossTenantToken.statusCode).toBe(404);
       const beta = await app.inject({ method: "GET", url: "/v1/report-automation", headers: authorization(betaToken) });
       expect(json<SuccessPayload<{ savedViews: unknown[]; schedules: unknown[]; jobs: unknown[] }>>(beta).data).toMatchObject({ savedViews: [], schedules: [], jobs: [] });
     });

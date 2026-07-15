@@ -45,6 +45,8 @@ export {
   isCanonicalUuid,
   PostgresCalloraRepository,
   PostgresPairingAttemptLimiter,
+  PostgresReportWorkerRepository,
+  PostgresReportRowLoader,
   UuidIdGenerator,
   type CreatePostgresPoolOptions,
   type OutboxEventRecord,
@@ -52,3 +54,19 @@ export {
   type PgPoolLike,
   type PostgresRepositoryOptions,
 } from "./postgres/index.js";
+export {
+  FileSystemReportArtifactStore,
+  FileSystemReportArtifactReader,
+  processNextReportJob,
+  renderCsv,
+  runReportOperationalTick,
+  runReportWorkerLoop,
+  type ClaimedReportJob,
+  type ReportArtifactStore,
+  type ReportArtifactReader,
+  type ReportCell,
+  type ReportRow,
+  type ReportScheduleEnqueuer,
+  type ReportWorkerRepository,
+} from "./report-worker.js";
+export { loadReportWorkerConfig, type ReportWorkerConfig } from "./report-worker-config.js";

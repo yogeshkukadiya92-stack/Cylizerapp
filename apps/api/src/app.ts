@@ -59,7 +59,8 @@ import {
   type UpdateLeadRequest,
 } from "@callora/contracts";
 import { buildDashboardOverview, type DashboardPreset, type DashboardQuery } from "./analytics.js";
-import { hashDownloadToken } from "./report-workflows.js";
+import { createDownloadToken, hashDownloadToken, REPORT_DOWNLOAD_TTL_SECONDS } from "./report-workflows.js";
+import type { ReportArtifactReader } from "./report-worker.js";
 import {
   OidcBearerVerificationError,
   type OidcBearerVerifier,
@@ -114,6 +115,7 @@ export interface BuildAppOptions {
   pairingCodeGenerator?: PairingCodeGenerator;
   oidcVerifier?: OidcBearerVerifier;
   pairingLimiter?: SharedAttemptLimiter;
+  reportArtifactReader?: ReportArtifactReader;
   logger?: boolean;
 }
 
@@ -1474,8 +1476,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     const actor=currentActor(request); const body=bodyRecord(request); const job=await repository.createReportExportJob({organizationId:actor.organization.id,userId:actor.user.id,kind:reportKind(body.kind),format:reportFormat(body.format),parameters:isRecord(body.parameters)?body.parameters:{},at:clock.now().toISOString()}); reply.code(202); return success(request,job);
   });
 
-  app.post("/v1/report-downloads/:jobId/redeem", { preHandler: protect("reports.export") }, async (request) => {
-    const actor=currentActor(request); const params=isRecord(request.params)?request.params:{}; const body=bodyRecord(request); let tokenHash:Buffer; try{tokenHash=hashDownloadToken(requiredString(body.token,"token",100));}catch{throw badRequest("The download token is invalid","token");} const grant=await repository.redeemReportDownload({organizationId:actor.organization.id,userId:actor.user.id,jobId:requiredString(params.jobId,"jobId",100),tokenHash,redemptionId:randomUUID(),at:clock.now().toISOString()}); if(!grant)throw notFound("The report download is unavailable, expired, or already redeemed"); return success(request,grant);
+  app.post("/v1/report-downloads/:jobId/token", { preHandler: protect("reports.export") }, async (request) => {
+    const actor=currentActor(request); const params=isRecord(request.params)?request.params:{}; const token=createDownloadToken(); const at=clock.now(); const expiresAt=new Date(at.getTime()+REPORT_DOWNLOAD_TTL_SECONDS*1000).toISOString(); const issued=await repository.issueReportDownloadToken({organizationId:actor.organization.id,userId:actor.user.id,jobId:requiredString(params.jobId,"jobId",100),tokenHash:hashDownloadToken(token),expiresAt,at:at.toISOString()}); if(!issued)throw notFound("The ready report is unavailable or already redeemed"); return success(request,{token,expiresAt});
+  });
+
+  app.post("/v1/report-downloads/:jobId/redeem", { preHandler: protect("reports.export") }, async (request,reply) => {
+    if(!options.reportArtifactReader) throw new ApiDomainError({statusCode:503,code:"INTERNAL_ERROR",message:"Report downloads are temporarily unavailable"});
+    const actor=currentActor(request); const params=isRecord(request.params)?request.params:{}; const body=bodyRecord(request); let tokenHash:Buffer; try{tokenHash=hashDownloadToken(requiredString(body.token,"token",100));}catch{throw badRequest("The download token is invalid","token");} const grant=await repository.redeemReportDownload({organizationId:actor.organization.id,userId:actor.user.id,jobId:requiredString(params.jobId,"jobId",100),tokenHash,redemptionId:randomUUID(),at:clock.now().toISOString()}); if(!grant)throw notFound("The report download is unavailable, expired, or already redeemed"); const artifact=await options.reportArtifactReader.get(grant.objectKey); if(!artifact)throw notFound("The report artifact is unavailable"); reply.header("content-type",artifact.contentType); reply.header("content-disposition",`attachment; filename="${artifact.fileName}"`); reply.header("cache-control","private, no-store"); reply.header("x-content-type-options","nosniff"); return reply.send(Buffer.from(artifact.body));
   });
 
   app.get("/v1/notifications", { preHandler: protect("reports.read") }, async (request) => {
