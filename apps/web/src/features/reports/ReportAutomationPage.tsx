@@ -8,38 +8,24 @@ import { AccessibleDialog } from '../../components/AccessibleDialog'
 
 interface Props { authSession?: AuthSession; client?: CalloraApiClient; onAuthenticationFailure?: (reason: AuthorizationFailure) => void; onNotify: (message: string) => void }
 
-const demoSavedViews: SavedReportView[] = [
-  { id: 'view_1', organizationId: 'org_demo', ownerUserId: 'user_demo', name: 'High-value leads', kind: 'lead_performance', filters: { score: '75+', period: 'This month' }, createdAt: '2026-07-14T07:00:00.000Z', updatedAt: '2026-07-14T07:00:00.000Z' },
-  { id: 'view_2', organizationId: 'org_demo', ownerUserId: 'user_demo', name: 'Sales team performance', kind: 'employee_performance', filters: { team: 'Sales', period: 'Last 30 days' }, createdAt: '2026-07-13T07:00:00.000Z', updatedAt: '2026-07-13T07:00:00.000Z' },
-  { id: 'view_3', organizationId: 'org_demo', ownerUserId: 'user_demo', name: 'Missed calls · this week', kind: 'never_attended', filters: { outcome: 'Missed', period: 'This week' }, createdAt: '2026-07-12T07:00:00.000Z', updatedAt: '2026-07-12T07:00:00.000Z' },
-]
-
-const demoSchedules: ReportSchedule[] = [
-  { id: 'schedule_1', organizationId: 'org_demo', savedViewId: 'view_2', name: 'Daily lead summary', cadence: 'daily', localTime: '08:00', timeZone: 'Asia/Kolkata', format: 'pdf', recipients: ['manager@callora.test', 'owner@callora.test'], status: 'active', nextRunAt: '2026-07-16T02:30:00.000Z' },
-  { id: 'schedule_2', organizationId: 'org_demo', savedViewId: 'view_2', name: 'Weekly sales performance', cadence: 'weekly', weekDay: 1, localTime: '09:00', timeZone: 'Asia/Kolkata', format: 'xlsx', recipients: ['sales@callora.test'], status: 'active', nextRunAt: '2026-07-20T03:30:00.000Z' },
-  { id: 'schedule_3', organizationId: 'org_demo', savedViewId: 'view_3', name: 'Missed calls digest', cadence: 'daily', localTime: '10:00', timeZone: 'Asia/Kolkata', format: 'csv', recipients: ['ops@callora.test'], status: 'paused', nextRunAt: '2026-07-16T04:30:00.000Z' },
-]
-
 const events: Array<{ key: NotificationEvent; label: string }> = [
   { key: 'missed_call', label: 'Missed calls' }, { key: 'overdue_follow_up', label: 'Overdue follow-ups' },
   { key: 'device_offline', label: 'Device offline' }, { key: 'import_completed', label: 'Import completed' }, { key: 'export_ready', label: 'Export ready' },
 ]
 
 const initialPreferences: NotificationPreference[] = events.map(({ key }) => ({ event: key, email: key !== 'import_completed', inApp: key !== 'device_offline' }))
-const demoJobs: ReportExportJob[] = [{ id: 'job_1', kind: 'lead_performance', format: 'xlsx', status: 'processing', requestedAt: '2026-07-15T09:02:00.000Z' }]
-
 function Toggle({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
   const Icon = active ? ToggleRight : ToggleLeft
   return <button aria-label={label} aria-pressed={active} className={`automation-toggle ${active ? 'is-active' : ''}`} onClick={onClick} type="button"><Icon size={28} /></button>
 }
 
 export function ReportAutomationPage({ authSession, client, onAuthenticationFailure, onNotify }: Props) {
-  const [savedViews, setSavedViews] = useState(demoSavedViews)
-  const [schedules, setSchedules] = useState(demoSchedules)
-  const [jobs, setJobs] = useState(demoJobs)
+  const [savedViews, setSavedViews] = useState<SavedReportView[]>([])
+  const [schedules, setSchedules] = useState<ReportSchedule[]>([])
+  const [jobs, setJobs] = useState<ReportExportJob[]>([])
   const [preferences, setPreferences] = useState(initialPreferences)
   const [isScheduleOpen, setScheduleOpen] = useState(false)
-  const [scheduleDraft, setScheduleDraft] = useState({ name: '', savedViewId: demoSavedViews[0]!.id, cadence: 'daily' as 'daily'|'weekly', weekDay: 1, localTime: '08:00', format: 'csv' as 'csv'|'xlsx'|'pdf', recipients: '' })
+  const [scheduleDraft, setScheduleDraft] = useState({ name: '', savedViewId: '', cadence: 'daily' as 'daily'|'weekly', weekDay: 1, localTime: '08:00', format: 'csv' as 'csv'|'xlsx'|'pdf', recipients: '' })
   const [isSaving, setSaving] = useState(false)
   const [downloadingJobId, setDownloadingJobId] = useState<string | null>(null)
   const activeCount = useMemo(() => schedules.filter((item) => item.status === 'active').length, [schedules])
@@ -47,7 +33,7 @@ export function ReportAutomationPage({ authSession, client, onAuthenticationFail
   useEffect(() => {
     if (!authSession || !client) return
     const controller = new AbortController()
-    void (async () => { try { const token=await authSession.getAccessToken(controller.signal); if(!token)return; const snapshot=await client.getReportAutomation(token,controller.signal); if(controller.signal.aborted)return; if(snapshot.savedViews.length)setSavedViews(snapshot.savedViews); setSchedules(snapshot.schedules); setJobs(snapshot.jobs); if(snapshot.preferences.length)setPreferences(snapshot.preferences) } catch { if(authSession.mode==='oidc') onAuthenticationFailure?.('service_unavailable') } })()
+    void (async () => { try { const token=await authSession.getAccessToken(controller.signal); if(!token)return; const snapshot=await client.getReportAutomation(token,controller.signal); if(controller.signal.aborted)return; setSavedViews(snapshot.savedViews); setScheduleDraft((current)=>({...current,savedViewId:snapshot.savedViews.some((view)=>view.id===current.savedViewId)?current.savedViewId:snapshot.savedViews[0]?.id??''})); setSchedules(snapshot.schedules); setJobs(snapshot.jobs); if(snapshot.preferences.length)setPreferences(snapshot.preferences) } catch { if(authSession.mode!=='dev') onAuthenticationFailure?.('service_unavailable') } })()
     return () => controller.abort()
   }, [authSession, client, onAuthenticationFailure])
 
@@ -57,10 +43,10 @@ export function ReportAutomationPage({ authSession, client, onAuthenticationFail
     setPreferences(next)
     try { const accessToken=await token(); if(client&&accessToken) await client.updateNotificationPreferences(next,accessToken); onNotify('Notification preference saved') } catch { setPreferences(preferences); onNotify('Could not save notification preference') }
   }
-  const saveView = async () => { try { const accessToken=await token(); if(!client||!accessToken){onNotify('Current report view saved');return} const view=await client.createSavedReportView({name:`Lead performance ${savedViews.length+1}`,kind:'lead_performance',filters:{period:'This month'}},accessToken); setSavedViews((current)=>[view,...current]); setScheduleDraft((current)=>({...current,savedViewId:view.id})); onNotify('Current report view saved') } catch { onNotify('Could not save report view') } }
-  const createSchedule = async () => { const recipients=scheduleDraft.recipients.split(',').map((item)=>item.trim()).filter(Boolean); if(!scheduleDraft.name.trim()||recipients.length===0){onNotify('Enter a schedule name and at least one recipient');return} setSaving(true); try { const accessToken=await token(); if(!client||!accessToken){onNotify('Schedule created');setScheduleOpen(false);return} const created=await client.createReportSchedule({...scheduleDraft,name:scheduleDraft.name.trim(),recipients,...(scheduleDraft.cadence==='weekly'?{weekDay:scheduleDraft.weekDay}:{})},accessToken); setSchedules((current)=>[...current,created]); setScheduleOpen(false); onNotify('Report schedule created') } catch { onNotify('Could not create report schedule') } finally { setSaving(false) } }
+  const saveView = async () => { try { const accessToken=await token(); if(!client||!accessToken)throw new Error('Authentication required'); const view=await client.createSavedReportView({name:`Lead performance ${savedViews.length+1}`,kind:'lead_performance',filters:{period:'This month'}},accessToken); setSavedViews((current)=>[view,...current]); setScheduleDraft((current)=>({...current,savedViewId:view.id})); onNotify('Current report view saved') } catch { onNotify('Could not save report view') } }
+  const createSchedule = async () => { const recipients=scheduleDraft.recipients.split(',').map((item)=>item.trim()).filter(Boolean); if(!scheduleDraft.name.trim()||recipients.length===0){onNotify('Enter a schedule name and at least one recipient');return} if(!scheduleDraft.savedViewId){onNotify('Create or choose a saved view first');return} setSaving(true); try { const accessToken=await token(); if(!client||!accessToken)throw new Error('Authentication required'); const created=await client.createReportSchedule({...scheduleDraft,name:scheduleDraft.name.trim(),recipients,...(scheduleDraft.cadence==='weekly'?{weekDay:scheduleDraft.weekDay}:{})},accessToken); setSchedules((current)=>[...current,created]); setScheduleOpen(false); onNotify('Report schedule created') } catch { onNotify('Could not create report schedule') } finally { setSaving(false) } }
   const toggleSchedule = async (item: ReportSchedule) => { const status: ReportSchedule['status']=item.status==='active'?'paused':'active'; try { const accessToken=await token(); const updated: ReportSchedule=client&&accessToken?await client.updateReportSchedule(item.id,status,accessToken):{...item,status}; setSchedules((current)=>current.map((schedule)=>schedule.id===item.id?updated:schedule)); onNotify(`Schedule ${status}`) } catch { onNotify('Could not update schedule') } }
-  const queueExport = async () => { try { const accessToken=await token(); if(!client||!accessToken){onNotify('Export queued');return} const job=await client.createReportExport({kind:'lead_performance',format:'csv',parameters:{period:'this_month'}},accessToken); setJobs((current)=>[job,...current]); onNotify('Export queued') } catch { onNotify('Could not queue export') } }
+  const queueExport = async () => { try { const accessToken=await token(); if(!client||!accessToken)throw new Error('Authentication required'); const job=await client.createReportExport({kind:'lead_performance',format:'csv',parameters:{period:'this_month'}},accessToken); setJobs((current)=>[job,...current]); onNotify('Export queued') } catch { onNotify('Could not queue export') } }
   const downloadExport = async (job: ReportExportJob) => { if(!client||!authSession||job.status!=='ready'||downloadingJobId)return; setDownloadingJobId(job.id); try { const accessToken=await authSession.getAccessToken(); if(!accessToken)throw new Error('Authentication required'); const grant=await client.issueReportDownloadToken(job.id,accessToken); const file=await client.downloadReport(job.id,grant.token,accessToken); const href=URL.createObjectURL(file.blob); const anchor=document.createElement('a'); anchor.href=href; anchor.download=file.fileName; anchor.click(); URL.revokeObjectURL(href); onNotify('Report downloaded') } catch { onNotify('Could not download report') } finally { setDownloadingJobId(null) } }
   return <div className="report-automation-page">
     <section aria-label="Report automation metrics" className="automation-metrics">

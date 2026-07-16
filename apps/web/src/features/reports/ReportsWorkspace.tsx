@@ -123,7 +123,7 @@ export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotif
       } catch (error) {
         if (controller.signal.aborted) return
         const failure = authorizationFailure(error)
-        if (authSession.mode === 'oidc') {
+        if (authSession.mode !== 'dev') {
           onAuthenticationFailure(failure ?? 'service_unavailable')
           return
         }

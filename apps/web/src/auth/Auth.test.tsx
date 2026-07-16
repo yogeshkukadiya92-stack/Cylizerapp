@@ -356,7 +356,7 @@ describe('Callora authentication', () => {
 
     render(<App authSession={new OidcAuthSession(oidcConfig(), manager)} />)
 
-    expect(await screen.findByText(/Demo data is disabled in OIDC mode/)).toBeInTheDocument()
+    expect(await screen.findByText(/could not load live workspace data/)).toBeInTheDocument()
     expect(screen.queryByRole('status', { name: 'Data source: Demo data · API unavailable' })).not.toBeInTheDocument()
     expect(screen.queryByText('Amit Patel')).not.toBeInTheDocument()
   })

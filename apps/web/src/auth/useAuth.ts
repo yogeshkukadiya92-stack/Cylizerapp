@@ -88,7 +88,7 @@ export function useAuth(authSession: AuthSession) {
       setState({
         status: 'error',
         user: null,
-        error: 'Callora could not load live workspace data. Demo data is disabled in OIDC mode.',
+        error: 'Callora could not load live workspace data. Please try again when the service is available.',
       })
       return
     }

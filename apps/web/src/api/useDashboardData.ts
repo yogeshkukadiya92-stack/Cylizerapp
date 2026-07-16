@@ -106,7 +106,7 @@ export function useDashboardData(
         if (controller.signal.aborted || isAbortError(error)) return
         if (requestVersion !== requestVersionRef.current) return
         const failure = authorizationFailure(error)
-        if (authSession.mode === 'oidc') {
+        if (authSession.mode !== 'dev') {
           onAuthenticationFailure?.(failure ?? 'service_unavailable')
           return
         }

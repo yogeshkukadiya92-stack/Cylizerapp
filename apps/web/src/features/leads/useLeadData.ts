@@ -176,7 +176,7 @@ export function useLeadData({
       } catch (error) {
         if (controller.signal.aborted || isAbortError(error) || requestVersion !== requestVersionRef.current) return
         const failure = authorizationFailure(error)
-        if (authSession.mode === 'oidc') {
+        if (authSession.mode !== 'dev') {
           if (failure === 'forbidden') {
             setPermissions(EMPTY_PERMISSIONS)
             setAllLeads([])
