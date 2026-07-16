@@ -128,6 +128,10 @@ function success<T>(request: FastifyRequest, data: T): { ok: true; data: T; requ
   return { ok: true, data, requestId: request.id };
 }
 
+function credentialCorrelationId(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 16);
+}
+
 function bodyRecord(request: FastifyRequest): Record<string, unknown> {
   if (!isRecord(request.body)) throw badRequest("Request body must be a JSON object");
   return request.body;
@@ -723,7 +727,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       credentialType,
       at: clock.now().toISOString(),
     });
-    if (!context) throw unauthenticated("The device credential is invalid");
+    if (!context) {
+      request.log.warn(
+        { credentialType, credentialCorrelationId: credentialCorrelationId(token) },
+        "Device credential resolution failed",
+      );
+      throw unauthenticated("The device credential is invalid");
+    }
     request.mobileDevice = context;
   };
   const authenticateMobileEither: preHandlerHookHandler = async (request) => {
@@ -1748,6 +1758,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       }
       throw unauthenticated("The device credential is invalid");
     }
+    request.log.info(
+      { credentialCorrelationId: credentialCorrelationId(request.body.proposedSessionCredential) },
+      "Device session activated",
+    );
     if (!activated.replayed && !repository.mobileTransitionEvidenceAtomic) {
       await audit({
         organizationId: context.organizationId,

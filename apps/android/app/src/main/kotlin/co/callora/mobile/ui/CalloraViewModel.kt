@@ -13,6 +13,7 @@ import co.callora.mobile.AppContainer
 import co.callora.mobile.BuildConfig
 import co.callora.mobile.calls.VariantCapabilities
 import co.callora.mobile.core.logging.SafeLog
+import co.callora.mobile.core.security.CredentialDiagnostics
 import co.callora.mobile.core.model.DeviceCredentials
 import co.callora.mobile.core.model.DevicePermissionReport
 import co.callora.mobile.core.model.PermissionState
@@ -572,6 +573,14 @@ class CalloraViewModel(
             permissions = currentPermissionReport(),
         )
         container.credentialVault.write(credentials)
+        val persistedCredentials = checkNotNull(container.credentialVault.read()) {
+            "Persisted device credential is unreadable"
+        }
+        check(persistedCredentials == credentials) { "Persisted device credential does not round-trip" }
+        SafeLog.info(
+            "CalloraCredential",
+            "Activation stored credential ${CredentialDiagnostics.correlationId(credentials.sessionToken)}",
+        )
         // Exact activation replay may remain valid after policy rollover. Journal a
         // fail-closed new-session preflight before the old disclosure can open the
         // enterprise permission prompt or collection gate.

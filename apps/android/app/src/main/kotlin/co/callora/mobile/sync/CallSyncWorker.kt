@@ -18,6 +18,7 @@ import co.callora.mobile.core.model.PermissionState
 import co.callora.mobile.core.protocol.AuthoritativePolicyValidator
 import co.callora.mobile.core.protocol.MobileProtocolState
 import co.callora.mobile.core.protocol.ProtocolPhase
+import co.callora.mobile.core.security.CredentialDiagnostics
 import co.callora.mobile.data.api.MobileApiException
 import java.time.Instant
 import kotlinx.coroutines.sync.withLock
@@ -47,6 +48,10 @@ class CallSyncWorker(
             if (preferences.disclosureAccepted) invalidateSessionForRepair()
             return Result.success()
         }
+        SafeLog.info(
+            TAG,
+            "Worker loaded credential ${CredentialDiagnostics.correlationId(credentials.sessionToken)}",
+        )
         // Recover the local half of a stale-consent/revocation transition if the
         // process died immediately after its encrypted journal commit.
         if (protocol.phase in CONSENT_PHASES) {
