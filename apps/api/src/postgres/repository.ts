@@ -3623,7 +3623,7 @@ export class PostgresCalloraRepository implements CalloraRepository {
     context: MobileDeviceContext,
     at: string,
     requireCurrentConsent = true,
-  ): Promise<{ actorUserId: string; device: DbRow; consentCurrent: boolean } | undefined> {
+  ): Promise<{ actorUserId?: string; device: DbRow; consentCurrent: boolean } | undefined> {
     // Shared mutation lock order: employee -> device -> all device credentials
     // (stable ID order) -> consent -> organization. Heartbeat, ingest, and
     // lead update must never acquire this trust graph in a different order.
@@ -3681,9 +3681,15 @@ export class PostgresCalloraRepository implements CalloraRepository {
     `, [context.organizationId, context.deviceId, at]);
     const consentCurrent = Boolean(consentLock.rows[0]) && consent.rows[0]?.consent_current === true;
     if (requireCurrentConsent && !consentCurrent) throw domainConsentRequired();
-    const actorUserId = employeeRow.linked_user_id;
-    if (typeof actorUserId !== "string" || !isCanonicalUuid(actorUserId)) return undefined;
-    return { actorUserId, device: deviceRow, consentCurrent };
+    const actorUserId = typeof employeeRow.linked_user_id === "string" &&
+      isCanonicalUuid(employeeRow.linked_user_id)
+      ? employeeRow.linked_user_id
+      : undefined;
+    return {
+      ...(actorUserId === undefined ? {} : { actorUserId }),
+      device: deviceRow,
+      consentCurrent,
+    };
   }
 
   async applyMobileLeadUpdate(options: MobileLeadUpdateOptions): Promise<MobileLeadUpdateReceipt | undefined> {
@@ -3699,6 +3705,9 @@ export class PostgresCalloraRepository implements CalloraRepository {
       const trust = await this.lockActiveMobileTrustWithClient(client, context, options.at);
       if (!trust) return undefined;
       const { actorUserId } = trust;
+      // Lead notes and audit rows require a real user identity. Heartbeat and
+      // call ingestion remain valid for intentionally unlinked workforce rows.
+      if (!actorUserId) return undefined;
 
       // Exact device/request/resource/fingerprint binding is a replay grant
       // for the already-completed command. Check it before requiring the lead

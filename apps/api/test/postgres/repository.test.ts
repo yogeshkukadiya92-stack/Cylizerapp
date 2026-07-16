@@ -946,9 +946,14 @@ describe("PostgresCalloraRepository transaction and tenant boundaries", () => {
     expect(client.calls.some((call) => normalized(call.text).includes("register_call_ingest_batch"))).toBe(false);
   });
 
-  it("locks the active mobile trust context and persists heartbeat health fields", async () => {
-    const client = new ScriptedClient(({ text }) =>
-      mobileTrustRows(normalized(text)) ?? []);
+  it("accepts heartbeat for an active unlinked employee and persists health fields", async () => {
+    const client = new ScriptedClient(({ text }) => {
+      const sql = normalized(text);
+      if (sql.startsWith("select linked_user_id, status from callora.employees")) {
+        return [{ linked_user_id: null, status: "active" }];
+      }
+      return mobileTrustRows(sql) ?? [];
+    });
     const repository = new PostgresCalloraRepository(new ScriptedPool(client));
 
     const result = await repository.recordDeviceHeartbeat({
