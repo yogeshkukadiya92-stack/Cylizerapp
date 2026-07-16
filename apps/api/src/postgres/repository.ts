@@ -5443,9 +5443,12 @@ export class PostgresCalloraRepository implements CalloraRepository {
           set processed_item_count = $3,
               status = 'completed',
               next_cursor = $4,
-              completed_at = $5::timestamptz,
+              -- received_at uses the database statement clock and can be a few
+              -- milliseconds after the API request clock. Preserve the schema's
+              -- monotonic completion invariant across that boundary.
+              completed_at = greatest($5::timestamptz, received_at),
               response_body = $6::jsonb,
-              updated_at = $5::timestamptz
+              updated_at = greatest($5::timestamptz, received_at)
           where organization_id = $1::uuid and id = $2::uuid
         `, [
           options.context.organizationId,

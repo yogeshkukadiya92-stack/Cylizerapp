@@ -1109,6 +1109,9 @@ describe("PostgresCalloraRepository transaction and tenant boundaries", () => {
     expect(Buffer.isBuffer(encryptedUpsert?.values[9])).toBe(true);
     const responseUpdateIndex = statements.findIndex((sql) => sql.startsWith("update callora.call_ingest_batches set processed_item_count"));
     expect(responseUpdateIndex).toBeGreaterThan(0);
+    expect(statements[responseUpdateIndex]).toContain(
+      "completed_at = greatest($5::timestamptz, received_at)",
+    );
     expect(statements.indexOf("commit")).toBeGreaterThan(responseUpdateIndex);
     const deviceLock = client.calls.find((call) =>
       normalized(call.text).startsWith("select * from callora.employee_devices"));

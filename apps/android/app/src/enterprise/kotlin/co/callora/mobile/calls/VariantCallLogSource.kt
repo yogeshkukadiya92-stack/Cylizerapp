@@ -49,7 +49,11 @@ private class EnterpriseCallLogSource(
                 projection,
                 "${CallLog.Calls.DATE} > ?",
                 arrayOf(sinceEpochMillisExclusive.toString()),
-                "${CallLog.Calls.DATE} ASC LIMIT $boundedLimit",
+                // CallLogProvider enables strict SQL grammar on current Android
+                // versions and rejects LIMIT inside sortOrder. The activation
+                // checkpoint already bounds eligible history; enforce the batch
+                // limit while iterating the ordered cursor below.
+                "${CallLog.Calls.DATE} ASC",
             )?.use { cursor ->
                 val idIndex = cursor.getColumnIndexOrThrow(CallLog.Calls._ID)
                 val numberIndex = cursor.getColumnIndexOrThrow(CallLog.Calls.NUMBER)
