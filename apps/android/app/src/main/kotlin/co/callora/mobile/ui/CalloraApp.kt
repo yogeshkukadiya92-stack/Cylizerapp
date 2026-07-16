@@ -79,6 +79,7 @@ import co.callora.mobile.calls.VariantCapabilities
 import co.callora.mobile.BuildConfig
 import co.callora.mobile.core.onboarding.OnboardingStage
 import co.callora.mobile.data.api.AssignedLead
+import co.callora.mobile.data.local.LocalCallItem
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -239,6 +240,7 @@ private fun CalloraHeader(stage: OnboardingStage, section: ReadySection) {
                         OnboardingStage.RECOVERING -> "Secure recovery"
                         OnboardingStage.PERMISSION -> "Permission"
                         OnboardingStage.READY -> when (section) {
+                            ReadySection.CALLS -> "Recent calls"
                             ReadySection.LEADS -> "Assigned leads"
                             ReadySection.STATUS -> "Collector status"
                             ReadySection.DIAGNOSTICS -> "Diagnostics"
@@ -468,6 +470,7 @@ private fun ReadyScreen(
     onRevoke: () -> Unit,
 ) {
     when (state.section) {
+        ReadySection.CALLS -> CallsScreen(modifier, state, onSync)
         ReadySection.LEADS -> LeadsScreen(
             modifier,
             state,
@@ -480,6 +483,70 @@ private fun ReadyScreen(
         ReadySection.SETTINGS -> SettingsScreen(modifier, state, onSaveApiUrl, onRotate, onRevoke)
     }
 }
+
+@Composable
+private fun CallsScreen(modifier: Modifier, state: CalloraUiState, onSync: () -> Unit) {
+    ScreenList(modifier.testTag("recent_calls_list")) {
+        item {
+            Heading("Calls")
+            Text("Recent call metadata collected on this device. Pull down fresh data with Sync now.")
+        }
+        item {
+            ElevatedCard {
+                Row(
+                    Modifier.fillMaxWidth().padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text("${state.recentCalls.size} recent calls", fontWeight = FontWeight.Bold)
+                        Text(
+                            "${state.queueCounts.pending} pending · ${state.queueCounts.retrying} retrying",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Button(onClick = onSync) { Text("Sync now") }
+                }
+            }
+        }
+        if (state.recentCalls.isEmpty()) {
+            item {
+                StatusBanner(
+                    "No calls collected yet",
+                    if (VariantCapabilities.displaysSyntheticData) "Run a demo sync to generate sample call metadata."
+                    else "Allow call-log access, then tap Sync now to import this phone's call history.",
+                )
+            }
+        } else {
+            items(state.recentCalls, key = LocalCallItem::id) { call -> CallCard(call) }
+        }
+    }
+}
+
+@Composable
+private fun CallCard(call: LocalCallItem) {
+    ElevatedCard {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(call.contactName ?: call.phoneNumber, fontWeight = FontWeight.Bold)
+                Text(call.direction.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase))
+            }
+            if (call.contactName != null) Text(call.phoneNumber, style = MaterialTheme.typography.bodySmall)
+            Text(
+                "${formatCallDate(call.startedAtEpochMillis)} · ${formatCallDuration(call.durationSeconds)} · ${call.disposition.lowercase()}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text("Sync: ${call.status.name.lowercase()}", style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+private fun formatCallDate(epochMillis: Long): String = DateTimeFormatter
+    .ofPattern("dd MMM, hh:mm a")
+    .withZone(ZoneId.systemDefault())
+    .format(Instant.ofEpochMilli(epochMillis))
+
+private fun formatCallDuration(seconds: Long): String = if (seconds < 60) "${seconds}s" else "${seconds / 60}m ${seconds % 60}s"
 
 private enum class LeadQueue(val label: String) {
     ALL("All"),
@@ -917,6 +984,7 @@ private fun ReadyNavigation(selected: ReadySection, onSelected: (ReadySection) -
     NavigationBar {
         ReadySection.entries.forEach { section ->
             val label = when (section) {
+                ReadySection.CALLS -> "Calls"
                 ReadySection.LEADS -> "Leads"
                 ReadySection.STATUS -> "Status"
                 ReadySection.DIAGNOSTICS -> "Health"

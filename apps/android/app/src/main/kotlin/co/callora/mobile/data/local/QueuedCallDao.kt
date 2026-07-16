@@ -58,6 +58,9 @@ interface QueuedCallDao {
     @Query("SELECT COUNT(*) FROM queued_calls WHERE status = 'REJECTED'")
     suspend fun rejectedCount(): Int
 
+    @Query("SELECT * FROM queued_calls ORDER BY startedAtEpochMillis DESC, localId DESC LIMIT :limit")
+    suspend fun recent(limit: Int): List<QueuedCallEntity>
+
     @Query("DELETE FROM queued_calls")
     suspend fun clearAll()
 }

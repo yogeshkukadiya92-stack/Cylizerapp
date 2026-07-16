@@ -57,6 +57,19 @@ class CallQueueRepository(
         rejected = dao.rejectedCount(),
     )
 
+    suspend fun recent(limit: Int = 200): List<LocalCallItem> = dao.recent(limit.coerceIn(1, 500)).map { entity ->
+        LocalCallItem(
+            id = entity.localId,
+            phoneNumber = decryptPhone(entity),
+            contactName = decryptContact(entity),
+            direction = entity.direction,
+            disposition = entity.disposition,
+            startedAtEpochMillis = entity.startedAtEpochMillis,
+            durationSeconds = entity.durationSeconds,
+            status = entity.status,
+        )
+    }
+
     fun decryptPhone(entity: QueuedCallEntity): String =
         fields.decrypt(entity.encryptedPhoneNumber, entity.localId, FIELD_PHONE)
 
@@ -82,4 +95,15 @@ class CallQueueRepository(
 data class QueueEnqueueResult(
     val inserted: Int,
     val skippedInvalid: Int,
+)
+
+data class LocalCallItem(
+    val id: String,
+    val phoneNumber: String,
+    val contactName: String?,
+    val direction: String,
+    val disposition: String,
+    val startedAtEpochMillis: Long,
+    val durationSeconds: Long,
+    val status: QueueStatus,
 )

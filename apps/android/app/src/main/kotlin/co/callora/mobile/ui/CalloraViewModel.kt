@@ -37,6 +37,7 @@ import co.callora.mobile.data.local.LeadMutationEnqueueResult
 import co.callora.mobile.data.local.LeadMutationEnqueueGate
 import co.callora.mobile.data.local.LeadMutationEnqueueGateDecision
 import co.callora.mobile.data.local.QueueCounts
+import co.callora.mobile.data.local.LocalCallItem
 import co.callora.mobile.sync.SyncScheduler
 import java.time.Instant
 import java.util.Locale
@@ -51,7 +52,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-enum class ReadySection { LEADS, STATUS, DIAGNOSTICS, SETTINGS }
+enum class ReadySection { CALLS, LEADS, STATUS, DIAGNOSTICS, SETTINGS }
 
 data class LeadUpdateComposer(
     val lead: AssignedLead,
@@ -67,7 +68,8 @@ data class CalloraUiState(
     val busy: Boolean = false,
     val message: String? = null,
     val errorCode: String? = null,
-    val section: ReadySection = ReadySection.LEADS,
+    val section: ReadySection = ReadySection.CALLS,
+    val recentCalls: List<LocalCallItem> = emptyList(),
     val assignedLeads: List<AssignedLead> = emptyList(),
     val leadSummary: AssignedLeadSummary = AssignedLeadSummary(0, 0, 0, 0),
     val leadsLoading: Boolean = false,
@@ -255,6 +257,7 @@ class CalloraViewModel(
     fun selectSection(section: ReadySection) {
         _state.update { it.copy(section = section) }
         if (section == ReadySection.LEADS) refreshAssignedLeads()
+        if (section == ReadySection.CALLS) refresh()
     }
 
     fun refreshAssignedLeads() {
@@ -953,7 +956,9 @@ class CalloraViewModel(
             consentStale = container.preferences.consentStale || consentTransition,
             revoked = container.preferences.revoked,
         )
-        val counts = withContext(Dispatchers.IO) { container.queue.counts() }
+        val (counts, recentCalls) = withContext(Dispatchers.IO) {
+            container.queue.counts() to container.queue.recent()
+        }
         val promptKey = policy?.contentHash?.takeIf {
             snapshot.stage == OnboardingStage.PERMISSION &&
                 container.preferences.permissionPromptedPolicyHash != it
@@ -966,6 +971,7 @@ class CalloraViewModel(
                 busy = false,
                 message = message ?: it.message,
                 queueCounts = counts,
+                recentCalls = if (snapshot.stage == OnboardingStage.READY) recentCalls else emptyList(),
                 lastSuccessfulSyncAt = container.preferences.lastSuccessfulSyncAt,
                 recentErrors = container.preferences.recentErrors(),
                 apiBaseUrl = container.preferences.apiBaseUrl,
