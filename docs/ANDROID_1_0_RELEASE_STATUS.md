@@ -16,12 +16,23 @@
 - One fictional post-consent emulator call collected, uploaded, and stored as a
   completed one-item production batch with no pending or retrying rows.
 - API test suite and enterprise Android unit/build checks.
+- Long-lived 4,096-bit RSA production signing identity stored outside the
+  repository, with its passwords held in macOS Keychain.
+- Android release preflight passed for the production Railway API origin.
+- Signed Enterprise APK and AAB built successfully. The APK signature verifies
+  with SHA-256 certificate fingerprint
+  `2F:5D:A6:4C:42:F2:A3:37:BA:2F:3B:A4:FF:DF:EA:E4:99:D2:6A:C3:E1:55:BA:19:F3:2B:7E:E7:D8:7A:6D:15`.
+- Signed Enterprise APK installed and cold-launched on the available emulator
+  as non-debuggable `co.callora.mobile` version `1.0.0`, with no crash-buffer
+  entries during the launch smoke test.
 
-## Release-signing gate
+## Release signing custody
 
-The release keystore must remain outside the repository. The signing owner must
-explicitly approve creating or selecting the long-lived key and must keep a
-recoverable protected backup. Build inputs are supplied only through:
+The release keystore is stored outside the repository at the approved local
+Callora signing location. Its generated passwords are stored in macOS Keychain
+and are loaded into build-process memory only. A recoverable protected backup
+must still be created before distribution. Build inputs are supplied only
+through:
 
 - `CALLORA_ANDROID_API_BASE_URL`
 - `CALLORA_ANDROID_KEYSTORE_PATH`
@@ -29,10 +40,10 @@ recoverable protected backup. Build inputs are supplied only through:
 - `CALLORA_ANDROID_KEYSTORE_PASSWORD`
 - `CALLORA_ANDROID_KEY_PASSWORD`
 
-After signing custody is approved, run `npm run release:preflight:android`, then
-build `:app:assembleEnterpriseRelease` and `:app:bundleEnterpriseRelease`.
-Verify the APK/AAB signer fingerprint and record artifact SHA-256 checksums before
-installing the release APK on a physical managed Android device.
+For every release, run `npm run release:preflight:android`, then build
+`:app:assembleEnterpriseRelease` and `:app:bundleEnterpriseRelease`. Verify the
+signer fingerprint and record fresh artifact SHA-256 checksums before installing
+the release APK on a physical managed Android device.
 
 ## External launch approvals
 
