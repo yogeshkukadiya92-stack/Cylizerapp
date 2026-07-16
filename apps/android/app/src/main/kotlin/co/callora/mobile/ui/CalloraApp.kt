@@ -489,7 +489,7 @@ private fun CallsScreen(modifier: Modifier, state: CalloraUiState, onSync: () ->
     ScreenList(modifier.testTag("recent_calls_list")) {
         item {
             Heading("Calls")
-            Text("Recent call metadata collected on this device. Pull down fresh data with Sync now.")
+            Text("Recent call metadata collected on this device. Tap Sync now to check for new calls.")
         }
         item {
             ElevatedCard {
@@ -528,8 +528,18 @@ private fun CallCard(call: LocalCallItem) {
     ElevatedCard {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(call.contactName ?: call.phoneNumber, fontWeight = FontWeight.Bold)
-                Text(call.direction.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase))
+                Text(
+                    call.contactName ?: call.phoneNumber,
+                    modifier = Modifier.weight(1f),
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.size(12.dp))
+                Text(
+                    call.direction.replace('_', ' ').lowercase().replaceFirstChar(Char::uppercase),
+                    style = MaterialTheme.typography.labelMedium,
+                )
             }
             if (call.contactName != null) Text(call.phoneNumber, style = MaterialTheme.typography.bodySmall)
             Text(
@@ -990,15 +1000,35 @@ private fun ReadyNavigation(selected: ReadySection, onSelected: (ReadySection) -
                 ReadySection.DIAGNOSTICS -> "Health"
                 ReadySection.SETTINGS -> "Settings"
             }
+            val iconLabel = when (section) {
+                ReadySection.CALLS -> "C"
+                ReadySection.LEADS -> "L"
+                ReadySection.STATUS -> "S"
+                ReadySection.DIAGNOSTICS -> "H"
+                ReadySection.SETTINGS -> "⚙"
+            }
             NavigationBarItem(
                 selected = selected == section,
                 onClick = { onSelected(section) },
                 icon = {
                     Box(
-                        Modifier.size(8.dp)
-                            .background(MaterialTheme.colorScheme.primary, CircleShape)
+                        Modifier.size(28.dp)
+                            .background(
+                                if (selected == section) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.surfaceVariant,
+                                CircleShape,
+                            )
                             .semantics { contentDescription = "$label tab" },
-                    )
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            iconLabel,
+                            color = if (selected == section) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
                 },
                 label = { Text(label) },
             )
