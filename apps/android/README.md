@@ -6,7 +6,12 @@ Phase 4A also adds a session-authenticated, employee-scoped Leads workspace. The
 
 Phase 4B adds assigned-lead writeback without weakening that boundary. An employee can update status, add a call note, and schedule a follow-up from lead detail or from the optional return prompt shown after the Phone app. Opening the dialer never counts as proof that a call occurred. Each submitted update becomes one immutable composite command with a UUID request ID, is AES-GCM encrypted before Room persistence, and reuses that UUID as `Idempotency-Key` until the server acknowledges or rejects it. Only one unresolved command is allowed per lead, conflicts stay visible for manual refresh, and every consent, credential, revocation, or enrollment purge crypto-erases pending lead commands with the call queue.
 
-This is a technical alpha, not a Play Store-ready release. The enterprise flavor's call-log access requires an approved distribution path, policy/legal review, a real production API origin, release signing, and end-to-end testing on supported devices before deployment.
+The enterprise flavor is production-connected and has passed deployed-origin
+pairing, activation, restart, heartbeat, Android call-log collection, encrypted
+queueing, upload, and PostgreSQL persistence on the controlled emulator. Public
+Play distribution is not yet approved: call-log access still requires an
+approved distribution path, policy/legal review, protected release signing, and
+end-to-end testing on the supported physical-device matrix.
 
 ## Build variants
 
