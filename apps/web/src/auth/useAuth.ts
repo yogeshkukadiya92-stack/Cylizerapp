@@ -43,6 +43,12 @@ export function useAuth(authSession: AuthSession) {
     try {
       const returnUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
       await authSession.signIn(returnUrl)
+      if (authSession.mode === 'builtin') {
+        const result = await authSession.initialize()
+        setState(result.status === 'signed_in'
+          ? { status: 'signed_in', user: result.user, error: null }
+          : { status: 'signed_out', user: null, error: null })
+      }
     } catch (error) {
       setState({ status: 'error', user: null, error: readableError(error) })
     }
