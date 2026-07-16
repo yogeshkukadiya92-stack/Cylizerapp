@@ -50,6 +50,12 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.HealthAndSafety
+import androidx.compose.material.icons.rounded.Phone
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -1000,35 +1006,21 @@ private fun ReadyNavigation(selected: ReadySection, onSelected: (ReadySection) -
                 ReadySection.DIAGNOSTICS -> "Health"
                 ReadySection.SETTINGS -> "Settings"
             }
-            val iconLabel = when (section) {
-                ReadySection.CALLS -> "C"
-                ReadySection.LEADS -> "L"
-                ReadySection.STATUS -> "S"
-                ReadySection.DIAGNOSTICS -> "H"
-                ReadySection.SETTINGS -> "⚙"
+            val icon = when (section) {
+                ReadySection.CALLS -> Icons.Rounded.Phone
+                ReadySection.LEADS -> Icons.Rounded.Groups
+                ReadySection.STATUS -> Icons.Rounded.Sync
+                ReadySection.DIAGNOSTICS -> Icons.Rounded.HealthAndSafety
+                ReadySection.SETTINGS -> Icons.Rounded.Settings
             }
             NavigationBarItem(
                 selected = selected == section,
                 onClick = { onSelected(section) },
                 icon = {
-                    Box(
-                        Modifier.size(28.dp)
-                            .background(
-                                if (selected == section) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.surfaceVariant,
-                                CircleShape,
-                            )
-                            .semantics { contentDescription = "$label tab" },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            iconLabel,
-                            color = if (selected == section) MaterialTheme.colorScheme.onPrimary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
+                    androidx.compose.material3.Icon(
+                        imageVector = icon,
+                        contentDescription = "$label tab",
+                    )
                 },
                 label = { Text(label) },
             )

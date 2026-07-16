@@ -15,6 +15,10 @@ val releaseApiBaseUrl = providers.gradleProperty("CALLORA_ANDROID_API_BASE_URL")
     .orElse(providers.environmentVariable("CALLORA_ANDROID_API_BASE_URL"))
     .orElse("https://api.callora.example")
     .get()
+val debugApiBaseUrl = providers.gradleProperty("CALLORA_ANDROID_DEBUG_API_BASE_URL")
+    .orElse(providers.environmentVariable("CALLORA_ANDROID_DEBUG_API_BASE_URL"))
+    .orElse("http://10.0.2.2:4100")
+    .get()
 val releaseKeystorePath = providers.environmentVariable("CALLORA_ANDROID_KEYSTORE_PATH").orNull
 val releaseKeystorePassword = providers.environmentVariable("CALLORA_ANDROID_KEYSTORE_PASSWORD").orNull
 val releaseKeyAlias = providers.environmentVariable("CALLORA_ANDROID_KEY_ALIAS").orNull
@@ -71,7 +75,7 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
-            buildConfigField("String", "DEFAULT_API_BASE_URL", "\"http://10.0.2.2:4100\"")
+            buildConfigField("String", "DEFAULT_API_BASE_URL", debugApiBaseUrl.asBuildConfigString())
         }
         release {
             isMinifyEnabled = true
@@ -197,6 +201,7 @@ dependencies {
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
+    implementation(libs.compose.material.icons.extended)
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
 
