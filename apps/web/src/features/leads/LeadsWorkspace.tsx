@@ -129,6 +129,13 @@ export function LeadsWorkspace({
         leads={leadData.leads}
         onAddLead={() => setAddLeadOpen(true)}
         onImportCsv={() => setOperationsTab('imports')}
+        onRetry={leadData.refresh}
+        onClearFilters={() => {
+          setQueue('all')
+          setStatusId('all')
+          setOwnerId('all')
+          onSearchChange('')
+        }}
         onManageAssignmentRules={() => setOperationsTab('rules')}
         onAddNote={() => setAddNoteOpen(true)}
         onCloseDetail={() => setDetailOpen(false)}

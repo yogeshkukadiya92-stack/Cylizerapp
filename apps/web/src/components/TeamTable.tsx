@@ -78,6 +78,7 @@ export function TeamTable({
           <ArrowDownToLine size={16} /> Export
         </button>
       </div>
+      <p className="table-scroll-hint">Swipe to view all columns</p>
       <div className="table-scroll">
         <table>
           <thead>

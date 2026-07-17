@@ -175,6 +175,7 @@ export function normalizeDashboardOverview(
     : []
 
   return {
+    generatedAt: overview.summary.generatedAt,
     metrics: buildMetrics(overview, dateRange),
     activityPoints: remoteActivity,
     outcomes: remoteOutcomes,

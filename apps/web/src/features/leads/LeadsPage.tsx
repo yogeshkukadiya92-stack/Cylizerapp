@@ -10,6 +10,7 @@ import {
   UserRound,
   Workflow,
 } from 'lucide-react'
+import { useState } from 'react'
 import { LeadDetailPanel } from './LeadDetailPanel'
 import { LeadTable } from './LeadTable'
 import type {
@@ -25,7 +26,7 @@ import type {
 } from './types'
 
 interface LeadsPageProps {
-  dataSource: { status: 'loading' | 'live' | 'demo'; error: string | null }
+  dataSource: { status: 'loading' | 'live' | 'demo' | 'error'; error: string | null }
   detail: LeadDetailView | null
   detailError: string | null
   detailLoading: boolean
@@ -44,6 +45,8 @@ interface LeadsPageProps {
   timeZone: string
   onAddLead: () => void
   onImportCsv: () => void
+  onRetry: () => void
+  onClearFilters: () => void
   onManageAssignmentRules: () => void
   onAddNote: () => void
   onCloseDetail: () => void
@@ -85,6 +88,8 @@ export function LeadsPage({
   timeZone,
   onAddLead,
   onImportCsv,
+  onRetry,
+  onClearFilters,
   onManageAssignmentRules,
   onAddNote,
   onCloseDetail,
@@ -98,6 +103,9 @@ export function LeadsPage({
   onStatusChange,
   onUpdateLead,
 }: LeadsPageProps) {
+  const [areFiltersOpen, setFiltersOpen] = useState(false)
+  const activeFilterCount = Number(ownerId !== 'all') + Number(statusId !== 'all')
+  const hasActiveFilters = activeFilterCount > 0 || queue !== 'all' || searchQuery.trim().length > 0
   if (dataSource.status === 'live' && !permissions.canRead) {
     return (
       <section className="module-preview" aria-labelledby="lead-access-heading">
@@ -116,17 +124,19 @@ export function LeadsPage({
           <h1>Lead pipeline</h1>
           {dataSource.status !== 'live' ? (
             <span
-              aria-label={`Lead data source: ${dataSource.status === 'loading' ? 'Loading live data' : 'Demo data, local drafts only'}`}
+              aria-label={`Lead data source: ${dataSource.status === 'loading' ? 'Loading live data' : dataSource.status === 'error' ? 'Live data unavailable' : 'Demo data, local drafts only'}`}
               className={`data-source data-source--${dataSource.status}`}
               role="status"
               title={dataSource.error ?? undefined}
             >
-              <i aria-hidden="true" />{dataSource.status === 'loading' ? 'Loading' : 'Demo · local drafts'}
+              <i aria-hidden="true" />{dataSource.status === 'loading' ? 'Loading' : dataSource.status === 'error' ? 'Unavailable' : 'Demo · local drafts'}
             </span>
           ) : null}
         </div>
         <p>Own every opportunity from first call to next action.</p>
       </header>
+
+      {dataSource.status === 'error' ? <div className="service-notice" role="alert"><div><strong>Lead data could not be loaded</strong><span>{dataSource.error ?? 'The service is temporarily unavailable.'}</span></div><button className="secondary-button" onClick={onRetry} type="button">Try again</button></div> : null}
 
       <div className="lead-filter-bar">
         <label className="lead-search-control">
@@ -145,7 +155,8 @@ export function LeadsPage({
           ))}
         </div>
 
-        <div className="lead-filter-selects">
+        <button aria-expanded={areFiltersOpen} className="secondary-button lead-mobile-filter-button" onClick={() => setFiltersOpen((current) => !current)} type="button"><SlidersHorizontal size={17} />Filters{activeFilterCount > 0 ? <small>{activeFilterCount}</small> : null}</button>
+        <div className={`lead-filter-selects ${areFiltersOpen ? 'lead-filter-selects--open' : ''}`}>
           <label>
             <UserRound aria-hidden="true" size={17} />
             <span className="sr-only">Lead owner filter</span>
@@ -181,7 +192,12 @@ export function LeadsPage({
 
       <div className={`lead-pipeline-layout ${isDetailOpen ? '' : 'lead-pipeline-layout--detail-closed'}`}>
         <LeadTable
+          canManage={permissions.canManage}
+          hasActiveFilters={hasActiveFilters}
           leads={leads}
+          onAddLead={onAddLead}
+          onClearFilters={onClearFilters}
+          onImportCsv={onImportCsv}
           onSelect={onSelectLead}
           referenceAt={referenceAt}
           selectedLeadId={selectedLeadId}

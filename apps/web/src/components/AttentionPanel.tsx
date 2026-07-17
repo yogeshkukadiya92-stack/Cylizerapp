@@ -1,4 +1,4 @@
-import { ChevronRight } from 'lucide-react'
+import { CheckCircle2, ChevronRight } from 'lucide-react'
 import type { AttentionItem } from '../types'
 
 interface AttentionPanelProps {
@@ -7,12 +7,13 @@ interface AttentionPanelProps {
 }
 
 export function AttentionPanel({ items, onSelect }: AttentionPanelProps) {
+  const isClear = items.length > 0 && items.every((item) => item.value === 0)
   return (
     <section className="panel attention-panel">
       <div className="panel-heading">
         <h2>Needs attention</h2>
       </div>
-      <div className="attention-list">
+      {isClear ? <div className="attention-clear" role="status"><CheckCircle2 aria-hidden="true" size={28} /><strong>You’re all caught up</strong><span>No missed calls, overdue leads, or device issues need review.</span></div> : <div className="attention-list">
         {items.map((item) => {
           const Icon = item.icon
           return (
@@ -27,7 +28,7 @@ export function AttentionPanel({ items, onSelect }: AttentionPanelProps) {
             </button>
           )
         })}
-      </div>
+      </div>}
     </section>
   )
 }

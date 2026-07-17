@@ -17,6 +17,7 @@ import {
 } from './client'
 import { AuthenticationRequiredError, type AuthSession } from '../auth/types'
 import type { AuthorizationFailure } from '../auth/useAuth'
+import { canUseDemoData } from '../runtime'
 
 const periodPresets: Record<DateRange, DashboardPreset> = {
   Today: 'today',
@@ -61,6 +62,7 @@ export function useDashboardData(
   const [employees, setEmployees] = useState<EmployeeRow[]>([])
   const [canManageDevices, setCanManageDevices] = useState(false)
   const [dataSource, setDataSource] = useState<DataSourceState>({ status: 'loading', error: null })
+  const [refreshVersion, setRefreshVersion] = useState(0)
   const localEmployeesRef = useRef(new Map<string, EmployeeRow>())
   const mutationControllersRef = useRef(new Set<AbortController>())
   const requestVersionRef = useRef(0)
@@ -106,8 +108,19 @@ export function useDashboardData(
         if (controller.signal.aborted || isAbortError(error)) return
         if (requestVersion !== requestVersionRef.current) return
         const failure = authorizationFailure(error)
-        if (authSession.mode !== 'dev') {
-          onAuthenticationFailure?.(failure ?? 'service_unavailable')
+        if (failure) {
+          onAuthenticationFailure?.(failure)
+          return
+        }
+        if (!canUseDemoData(authSession.mode)) {
+          if (authSession.mode !== 'dev') {
+            onAuthenticationFailure?.('service_unavailable')
+            return
+          }
+          setRemoteDashboard(null)
+          setCanManageDevices(false)
+          setEmployees(mergePendingEmployees([], [...localEmployeesRef.current.values()]))
+          setDataSource({ status: 'error', error: errorMessage(error) })
           return
         }
         setRemoteDashboard(null)
@@ -122,7 +135,7 @@ export function useDashboardData(
 
     void load()
     return () => controller.abort()
-  }, [authSession, client, dashboardKey, dateRange, employeeFilter, onAuthenticationFailure, preset])
+  }, [authSession, client, dashboardKey, dateRange, employeeFilter, onAuthenticationFailure, preset, refreshVersion])
 
   useEffect(() => () => {
     mutationControllersRef.current.forEach((controller) => controller.abort())
@@ -198,7 +211,7 @@ export function useDashboardData(
     : dataSource.status === 'demo'
       ? getDemoDashboard(dateRange)
       : getEmptyDashboard(dateRange)
-  const visibleDataSource: DataSourceState = hasCurrentRemoteData || dataSource.status === 'demo'
+  const visibleDataSource: DataSourceState = hasCurrentRemoteData || dataSource.status === 'demo' || dataSource.status === 'error'
     ? dataSource
     : { status: 'loading', error: null }
 
@@ -208,6 +221,7 @@ export function useDashboardData(
     dashboard,
     dataSource: visibleDataSource,
     employees,
+    retry: () => setRefreshVersion((current) => current + 1),
     revokeDevice,
   }
 }

@@ -27,6 +27,7 @@ export function DashboardWorkspace({
     dashboard,
     dataSource,
     employees,
+    retry,
     revokeDevice: revokeDeviceFromDataSource,
   } = useDashboardData(dateRange, employeeFilter, authSession, onAuthenticationFailure)
 
@@ -74,6 +75,7 @@ export function DashboardWorkspace({
         onDateRangeChange={setDateRange}
         onEmployeeFilterChange={setEmployeeFilter}
         onRevokeDevice={revokeDevice}
+        onRetry={retry}
         searchQuery={searchQuery}
       />
       <AddEmployeeDialog

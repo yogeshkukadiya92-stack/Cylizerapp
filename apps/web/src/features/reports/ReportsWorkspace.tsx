@@ -8,6 +8,8 @@ import type { AuthorizationFailure } from '../../auth/useAuth'
 import { demoLeadReport } from './data'
 import { LeadReportsPage, type LeadReportFilterDraft } from './LeadReportsPage'
 import { ReportAutomationPage } from './ReportAutomationPage'
+import { canUseDemoData } from '../../runtime'
+import type { DataSourceState } from '../../types'
 
 interface ReportsWorkspaceProps {
   authSession: AuthSession
@@ -88,7 +90,8 @@ export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotif
   const [employees, setEmployees] = useState<Array<{ id: string; name: string; team?: string }>>([])
   const [permissions, setPermissions] = useState<Permission[]>([])
   const [isRefreshing, setRefreshing] = useState(false)
-  const [dataSource, setDataSource] = useState<{ status: 'loading' | 'live' | 'demo'; error: string | null }>({ status: 'loading', error: null })
+  const [dataSource, setDataSource] = useState<DataSourceState>({ status: 'loading', error: null })
+  const [retryVersion, setRetryVersion] = useState(0)
   const appliedKey = JSON.stringify(appliedFilters)
 
   useEffect(() => {
@@ -123,8 +126,18 @@ export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotif
       } catch (error) {
         if (controller.signal.aborted) return
         const failure = authorizationFailure(error)
-        if (authSession.mode !== 'dev') {
-          onAuthenticationFailure(failure ?? 'service_unavailable')
+        if (failure) {
+          onAuthenticationFailure(failure)
+          return
+        }
+        if (!canUseDemoData(authSession.mode)) {
+          if (authSession.mode !== 'dev') {
+            onAuthenticationFailure('service_unavailable')
+            return
+          }
+          setPermissions([])
+          setEmployees([])
+          setDataSource({ status: 'error', error: error instanceof Error ? error.message : 'The reporting service is unavailable.' })
           return
         }
         setPermissions(['reports.read', 'reports.export'])
@@ -139,7 +152,7 @@ export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotif
     return () => controller.abort()
     // appliedKey is the stable request boundary; draft filter edits do not fetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedKey, authSession, client, onAuthenticationFailure])
+  }, [appliedKey, authSession, client, onAuthenticationFailure, retryVersion])
 
   const teams = useMemo(() => [...new Set(employees.map((employee) => employee.team).filter((team): team is string => Boolean(team)))].sort(), [employees])
 
@@ -167,6 +180,9 @@ export function ReportsWorkspace({ authSession, onAuthenticationFailure, onNotif
     return <section className="module-preview" aria-labelledby="report-access-heading"><div className="module-preview__icon"><BarChart3 size={27} /></div><p>Permission required</p><h1 id="report-access-heading">Lead reports</h1><span>Your role does not include reports.read for this workspace.</span></section>
   }
   if (!report) {
+    if (dataSource.status === 'error') {
+      return <section className="module-preview module-preview--error" aria-labelledby="report-error-heading"><div className="module-preview__icon"><BarChart3 size={27} /></div><p>Service unavailable</p><h1 id="report-error-heading">Lead reports could not be loaded</h1><span>{dataSource.error ?? 'Please try again in a moment.'}</span><button className="primary-button" onClick={() => setRetryVersion((current) => current + 1)} type="button">Try again</button></section>
+    }
     return <section className="module-preview" aria-label="Loading lead reports"><div className="module-preview__icon"><BarChart3 size={27} /></div><p>Loading</p><h1>Lead reports</h1><span>Preparing conversion and owner performance.</span></section>
   }
 

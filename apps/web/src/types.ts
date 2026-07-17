@@ -59,6 +59,7 @@ export interface RecentActivityItem {
 }
 
 export interface DashboardViewData {
+  generatedAt?: string
   metrics: DashboardMetric[]
   activityPoints: ActivityPoint[]
   outcomes: OutcomeItem[]
@@ -66,7 +67,7 @@ export interface DashboardViewData {
   recentActivities: RecentActivityItem[]
 }
 
-export type DataSourceStatus = 'loading' | 'live' | 'demo'
+export type DataSourceStatus = 'loading' | 'live' | 'demo' | 'error'
 
 export interface DataSourceState {
   status: DataSourceStatus

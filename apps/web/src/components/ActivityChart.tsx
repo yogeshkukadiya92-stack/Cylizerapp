@@ -9,9 +9,14 @@ interface ActivityChartProps {
 const chartWidth = 720
 const chartHeight = 250
 const plot = { left: 44, right: 18, top: 18, bottom: 38 }
-const maxY = 100
+function chartMaximum(points: ActivityPoint[]): number {
+  const observed = Math.max(1, ...points.flatMap((point) => [point.incoming, point.outgoing]))
+  const magnitude = 10 ** Math.floor(Math.log10(observed))
+  const step = Math.max(1, Math.ceil(observed / magnitude / 4) * magnitude)
+  return Math.max(4, step * 4)
+}
 
-function makeCoordinates(points: ActivityPoint[], key: 'incoming' | 'outgoing') {
+function makeCoordinates(points: ActivityPoint[], key: 'incoming' | 'outgoing', maxY: number) {
   const innerWidth = chartWidth - plot.left - plot.right
   const innerHeight = chartHeight - plot.top - plot.bottom
   return points.map((point, index) => ({
@@ -34,12 +39,13 @@ function smoothPath(coordinates: Array<{ x: number; y: number }>): string {
 
 export function ActivityChart({ points }: ActivityChartProps) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(3)
+  const maxY = useMemo(() => chartMaximum(points), [points])
   const coordinates = useMemo(
     () => ({
-      incoming: makeCoordinates(points, 'incoming'),
-      outgoing: makeCoordinates(points, 'outgoing'),
+      incoming: makeCoordinates(points, 'incoming', maxY),
+      outgoing: makeCoordinates(points, 'outgoing', maxY),
     }),
-    [points],
+    [maxY, points],
   )
   const activeHoveredIndex = hoveredIndex === null || points.length === 0
     ? null
@@ -72,7 +78,8 @@ export function ActivityChart({ points }: ActivityChartProps) {
           role="img"
           viewBox={`0 0 ${chartWidth} ${chartHeight}`}
         >
-          {[0, 20, 40, 60, 80, 100].map((tick) => {
+          {[0, 1, 2, 3, 4].map((position) => {
+            const tick = (maxY / 4) * position
             const y = plot.top + (chartHeight - plot.top - plot.bottom) - (tick / maxY) * (chartHeight - plot.top - plot.bottom)
             return (
               <g key={tick}>
@@ -100,7 +107,7 @@ export function ActivityChart({ points }: ActivityChartProps) {
                 x={point.x - (chartWidth - plot.left - plot.right) / points.length / 2}
                 y={plot.top}
               />
-              <text className="chart-axis-label chart-axis-label--x" x={point.x} y={chartHeight - 11}>{points[index].label}</text>
+              <text className={`chart-axis-label chart-axis-label--x ${index % 3 === 0 || index === points.length - 1 ? 'chart-axis-label--major' : 'chart-axis-label--minor'}`} x={point.x} y={chartHeight - 11}>{points[index].label}</text>
             </g>
           ))}
         </svg>

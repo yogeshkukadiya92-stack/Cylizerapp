@@ -26,6 +26,7 @@ interface DashboardPageProps {
   onDateRangeChange: (dateRange: DateRange) => void
   onEmployeeFilterChange: (employee: string) => void
   onRevokeDevice: (deviceId: string, reason: string) => Promise<boolean>
+  onRetry: () => void
 }
 
 export function DashboardPage({
@@ -41,6 +42,7 @@ export function DashboardPage({
   onDateRangeChange,
   onEmployeeFilterChange,
   onRevokeDevice,
+  onRetry,
 }: DashboardPageProps) {
   const displayedEmployees = employeeFilter === 'all'
     ? employees
@@ -49,7 +51,12 @@ export function DashboardPage({
     loading: 'Loading live data',
     live: 'Live data',
     demo: 'Demo data · API unavailable',
+    error: 'Live data unavailable',
   }[dataSource.status]
+  const updatedAt = dashboard.generatedAt ? new Date(dashboard.generatedAt) : null
+  const updatedLabel = updatedAt && !Number.isNaN(updatedAt.getTime())
+    ? new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(updatedAt)
+    : null
 
   return (
     <div className="dashboard-page">
@@ -65,6 +72,7 @@ export function DashboardPage({
             >
               <i aria-hidden="true" />{dataSourceLabel}
             </span>
+            {dataSource.status === 'live' && updatedLabel ? <span className="data-freshness">Updated {updatedLabel}</span> : null}
           </div>
           <p>Live activity and follow-up health across your team.</p>
         </div>
@@ -93,6 +101,13 @@ export function DashboardPage({
           </button>
         </div>
       </header>
+
+      {dataSource.status === 'error' ? (
+        <div className="service-notice" role="alert">
+          <div><strong>Dashboard data could not be loaded</strong><span>{dataSource.error ?? 'The service is temporarily unavailable.'}</span></div>
+          <button className="secondary-button" onClick={onRetry} type="button">Try again</button>
+        </div>
+      ) : null}
 
       <section aria-label="Key metrics" className="metrics-grid">
         {dashboard.metrics.map((metric) => <MetricCard key={metric.label} metric={metric} />)}

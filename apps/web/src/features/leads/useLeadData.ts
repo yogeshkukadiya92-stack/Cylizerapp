@@ -7,6 +7,8 @@ import type { AuthorizationFailure } from '../../auth/useAuth'
 import { buildDemoLeadDetail, DEMO_LEAD_NOW, demoLeadOwners, demoLeads, demoLeadStatuses } from './data'
 import { deriveLeadSummary, filterDemoLeads, initialsForLeadOwner } from './formatters'
 import { mapLeadDetail, mapLeadListResponse, mapLeadStatus } from './mappers'
+import { canUseDemoData } from '../../runtime'
+import type { DataSourceState } from '../../types'
 import type {
   CreateLeadFollowUpRequest,
   CreateLeadRequest,
@@ -92,7 +94,7 @@ export function useLeadData({
   const [statuses, setStatuses] = useState<LeadStatusOption[]>([])
   const [owners, setOwners] = useState<LeadOwnerOption[]>([])
   const [permissions, setPermissions] = useState<LeadPermissions>(EMPTY_PERMISSIONS)
-  const [dataSource, setDataSource] = useState<{ status: 'loading' | 'live' | 'demo'; error: string | null }>({
+  const [dataSource, setDataSource] = useState<DataSourceState>({
     status: 'loading',
     error: null,
   })
@@ -176,14 +178,25 @@ export function useLeadData({
       } catch (error) {
         if (controller.signal.aborted || isAbortError(error) || requestVersion !== requestVersionRef.current) return
         const failure = authorizationFailure(error)
-        if (authSession.mode !== 'dev') {
+        if (failure) {
           if (failure === 'forbidden') {
             setPermissions(EMPTY_PERMISSIONS)
             setAllLeads([])
             setDataSource({ status: 'live', error: 'You do not have permission to view leads.' })
             return
           }
-          onAuthenticationFailure?.(failure ?? 'service_unavailable')
+          onAuthenticationFailure?.(failure)
+          return
+        }
+        if (!canUseDemoData(authSession.mode)) {
+          if (authSession.mode !== 'dev') {
+            onAuthenticationFailure?.('service_unavailable')
+            return
+          }
+          setPermissions(EMPTY_PERMISSIONS)
+          setAllLeads([])
+          setServerSummary(null)
+          setDataSource({ status: 'error', error: errorMessage(error) })
           return
         }
 
